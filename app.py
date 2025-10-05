@@ -2,6 +2,7 @@ import os
 import threading
 import logging
 import random
+import time
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 
@@ -24,6 +25,7 @@ from pydantic import BaseModel, Field, ValidationError
 from werkzeug.security import generate_password_hash, check_password_hash
 from retry import retry
 from sqlalchemy import func
+from email_utils import send_checkpoint_email_async  # Import for email notifications
 
 # --- Logging Configuration ---
 logging.basicConfig(
@@ -140,7 +142,7 @@ class Shipment(db.Model):
             "dest_lat": self.dest_lat,
             "dest_lng": self.dest_lng,
             "status": self.status,
-            "updated_at": self.updated_at
+            "updated_at": self.updated_at.isoformat()  # Ensure JSON-serializable
         }
 
 class Checkpoint(db.Model):
@@ -162,7 +164,7 @@ class Checkpoint(db.Model):
             "lng": self.lng,
             "label": self.label,
             "note": self.note,
-            "timestamp": self.timestamp
+            "timestamp": self.timestamp.isoformat()  # Ensure JSON-serializable
         }
 
 class Subscriber(db.Model):
@@ -182,7 +184,7 @@ class ShipmentStatusHistory(db.Model):
             "id": self.id,
             "shipment_id": self.shipment_id,
             "status": self.status,
-            "timestamp": self.timestamp
+            "timestamp": self.timestamp.isoformat()  # Ensure JSON-serializable
         }
 
 class User(db.Model):
@@ -254,7 +256,8 @@ def send_message(chat_id, text):
         return
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": chat_id, "text": text})
+        response = requests.post(url, json={"chat_id": chat_id, "text": text}, timeout=5)
+        response.raise_for_status()
     except Exception as e:
         logger.error(f"Telegram send error: {e}")
 
@@ -370,7 +373,7 @@ def handle_update(update_json):
                         "lng": cp.lng,
                         "label": cp.label,
                         "note": cp.note,
-                        "timestamp": cp.timestamp
+                        "timestamp": cp.timestamp.isoformat()
                     } for cp in Checkpoint.query.filter_by(shipment_id=shipment.id).order_by(Checkpoint.position).all()]
                 }, broadcast=True)
                 send_message(chat_id, f"Added checkpoint to {tracking}")
@@ -481,7 +484,7 @@ def handle_update(update_json):
                         "lng": cp.lng,
                         "label": cp.label,
                         "note": cp.note,
-                        "timestamp": cp.timestamp
+                        "timestamp": cp.timestamp.isoformat()
                     } for cp in Checkpoint.query.filter_by(shipment_id=shipment.id).order_by(Checkpoint.position).all()]
                 }, broadcast=True)
                 send_message(chat_id, f"Updated status of {tracking} to {status}")
@@ -522,12 +525,10 @@ def handle_update(update_json):
                     ]
                     for i in range(steps):
                         frac = (i + 1) / float(steps)
-                        # Add random variation to coordinates (up to 0.05 degrees)
                         lat = shipment.origin_lat + (shipment.dest_lat - shipment.origin_lat) * frac
                         lng = shipment.origin_lng + (shipment.dest_lng - shipment.origin_lng) * frac
                         lat += random.uniform(-0.05, 0.05)
                         lng += random.uniform(-0.05, 0.05)
-                        # Ensure coordinates stay within valid ranges
                         lat = max(min(lat, 90), -90)
                         lng = max(min(lng, 180), -180)
                         position = Checkpoint.query.filter_by(shipment_id=shipment_id).count()
@@ -542,7 +543,6 @@ def handle_update(update_json):
                             note=note
                         )
                         shipment.updated_at = datetime.utcnow()
-                        # Update status based on progress
                         for status, threshold in status_stages:
                             if frac >= threshold and shipment.status != status:
                                 shipment.status = status
@@ -560,7 +560,7 @@ def handle_update(update_json):
                                 "lng": cp.lng,
                                 "label": cp.label,
                                 "note": cp.note,
-                                "timestamp": cp.timestamp
+                                "timestamp": cp.timestamp.isoformat()
                             } for cp in Checkpoint.query.filter_by(shipment_id=shipment_id).order_by(Checkpoint.position).all()]
                         }, broadcast=True)
                         time.sleep(interval)
@@ -639,13 +639,13 @@ class ShipmentResource(Resource):
             "status": shipment.status,
             "origin": {"lat": shipment.origin_lat, "lng": shipment.origin_lng},
             "destination": {"lat": shipment.dest_lat, "lng": shipment.dest_lng},
-            "updated_at": shipment.updated_at,
+            "updated_at": shipment.updated_at.isoformat(),
             "checkpoints": [{
                 "lat": cp.lat,
                 "lng": cp.lng,
                 "label": cp.label,
                 "note": cp.note,
-                "timestamp": cp.timestamp
+                "timestamp": cp.timestamp.isoformat()
             } for cp in checkpoints]
         }
 
@@ -758,7 +758,7 @@ class CheckpointResource(Resource):
                     "lng": cp.lng,
                     "label": cp.label,
                     "note": cp.note,
-                    "timestamp": cp.timestamp
+                    "timestamp": cp.timestamp.isoformat()
                 } for cp in Checkpoint.query.filter_by(shipment_id=shipment.id).order_by(Checkpoint.position).all()]
             }, broadcast=True)
             return {"ok": True}, 201
@@ -796,7 +796,7 @@ class AdminShipmentsResource(Resource):
             "status": s.status,
             "origin": {"lat": s.origin_lat, "lng": s.origin_lng},
             "destination": {"lat": s.dest_lat, "lng": s.dest_lng},
-            "updated_at": s.updated_at
+            "updated_at": s.updated_at.isoformat()
         } for s in shipments]
 
 @admin_ns.route("/analytics")
@@ -832,7 +832,6 @@ def health_check():
 @celery.task(bind=True, max_retries=3, retry_backoff=True)
 def send_checkpoint_email_task(self, shipment_id: int, checkpoint_id: int):
     try:
-        from email_utils import send_checkpoint_email_async
         shipment = Shipment.query.get(shipment_id)
         checkpoint = Checkpoint.query.get(checkpoint_id)
         if shipment and checkpoint:
@@ -863,356 +862,13 @@ def handle_subscribe(tracking):
             "lng": cp.lng,
             "label": cp.label,
             "note": cp.note,
-            "timestamp": cp.timestamp
+            "timestamp": cp.timestamp.isoformat()
         } for cp in checkpoints]
     })
     logger.info(f"WebSocket subscription successful for tracking: {tracking}")
 
 # --- Frontend Templates ---
-# templates/index.html (unchanged)
-"""
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Courier Tracking</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
-        .container { max-width: 600px; margin: 0 auto; text-align: center; }
-        input, button { padding: 10px; margin: 5px; }
-        .error { color: red; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Courier Tracking</h1>
-        <form action="/track" method="GET">
-            <input type="text" name="tracking" placeholder="Enter tracking number" required>
-            <button type="submit">Track</button>
-        </form>
-        {% if error %}
-        <p class="error">{{ error }}</p>
-        {% endif %}
-        <p><a href="/admin">Admin Login</a></p>
-    </div>
-</body>
-</html>
-"""
-
-# templates/track.html (updated with custom markers and controls)
-"""
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Track Shipment {{ shipment.tracking }}</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
-    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
-    <link rel="stylesheet" href="https://unpkg.com/leaflet.fullscreen@2.0.0/Control.FullScreen.css" />
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet-control-geocoder/1.13.0/leaflet-control-geocoder.min.css" />
-    <style>
-        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
-        .container { max-width: 800px; margin: 0 auto; }
-        .checkpoint { margin: 10px 0; padding: 10px; border-bottom: 1px solid #ddd; }
-        .status { font-weight: bold; }
-        #map { height: 400px; margin: 20px 0; }
-        .leaflet-tooltip { font-size: 12px; }
-        .custom-control { background: white; padding: 5px; border: 1px solid #ccc; }
-    </style>
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
-    <script src="https://unpkg.com/leaflet.fullscreen@2.0.0/Control.FullScreen.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet-control-geocoder/1.13.0/leaflet-control-geocoder.min.js"></script>
-    <script src="/static/socket.io.min.js"></script>
-    <script>
-        const socket = io();
-        let map, markerCluster, markers = [], polyline, bounds;
-
-        function initMap() {
-            map = L.map('map', {
-                zoomControl: true,
-                fullscreenControl: true
-            }).setView([{{ shipment.origin_lat }}, {{ shipment.origin_lng }}], 5);
-
-            // Base layers
-            const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-                maxZoom: 18
-            }).addTo(map);
-            const satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-                attribution: 'Tiles &copy; Esri',
-                maxZoom: 18
-            });
-
-            // Layers control
-            L.control.layers({
-                "OpenStreetMap": osm,
-                "Satellite": satellite
-            }).addTo(map);
-
-            // Scale control
-            L.control.scale({ metric: true, imperial: true }).addTo(map);
-
-            // Locate control
-            L.Control.geocoder({ collapsed: false, placeholder: 'Search location...' }).addTo(map);
-
-            // Reset view control
-            L.Control.ResetView = L.Control.extend({
-                options: { position: 'topright' },
-                onAdd: function(map) {
-                    const container = L.DomUtil.create('div', 'leaflet-bar custom-control');
-                    container.innerHTML = '<button onclick="resetView()">Reset View</button>';
-                    return container;
-                }
-            });
-            L.control.resetView = function(opts) { return new L.Control.ResetView(opts); };
-            L.control.resetView().addTo(map);
-
-            // Marker cluster group
-            markerCluster = L.markerClusterGroup({
-                maxClusterRadius: 50,
-                iconCreateFunction: function(cluster) {
-                    return L.divIcon({
-                        html: `<b>${cluster.getChildCount()}</b>`,
-                        className: 'marker-cluster',
-                        iconSize: [40, 40]
-                    });
-                }
-            });
-            map.addLayer(markerCluster);
-
-            updateMap({
-                status: '{{ shipment.status }}',
-                origin: { lat: {{ shipment.origin_lat }}, lng: {{ shipment.origin_lng }} },
-                destination: { lat: {{ shipment.dest_lat }}, lng: {{ shipment.dest_lng }} },
-                checkpoints: [
-                    {% for cp in checkpoints %}
-                    { lat: {{ cp.lat }}, lng: {{ cp.lng }}, label: "{{ cp.label }}", note: "{{ cp.note|default('') }}", timestamp: "{{ cp.timestamp }}" },
-                    {% endfor %}
-                ]
-            });
-        }
-
-        function resetView() {
-            if (bounds) map.fitBounds(bounds, { padding: [50, 50] });
-        }
-
-        function updateMap(data) {
-            // Clear existing markers and polyline
-            markerCluster.clearLayers();
-            markers = [];
-            if (polyline) map.removeLayer(polyline);
-
-            // Custom SVG icons
-            const originIcon = L.divIcon({
-                html: '<svg width="32" height="32" viewBox="0 0 24 24"><path fill="green" d="M20 10.5v.5h-16v-.5c0-2.5 1.5-4.7 3.7-5.7l-.7-2.3h10l-.7 2.3c2.2 1 3.7 3.2 3.7 5.7zM4 18h16v2h-16zM10 22h4v2h-4z"/></svg>',
-                className: 'custom-icon',
-                iconSize: [32, 32],
-                iconAnchor: [16, 32],
-                popupAnchor: [0, -32]
-            });
-            const destIcon = L.divIcon({
-                html: '<svg width="32" height="32" viewBox="0 0 24 24"><path fill="red" d="M12 2l-10 10h3v10h14v-10h3l-10-10zm0 2.83l6 6v8.17h-4v-4h-4v4h-4v-8.17l6-6z"/></svg>',
-                className: 'custom-icon',
-                iconSize: [32, 32],
-                iconAnchor: [16, 32],
-                popupAnchor: [0, -32]
-            });
-            const checkpointIcon = L.divIcon({
-                html: '<svg width="32" height="32" viewBox="0 0 24 24"><path fill="blue" d="M19 3h-14c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-14c0-1.1-.9-2-2-2zm-1 16h-12v-12h12v12z"/></svg>',
-                className: 'custom-icon',
-                iconSize: [32, 32],
-                iconAnchor: [16, 32],
-                popupAnchor: [0, -32]
-            });
-
-            // Add origin marker
-            const originMarker = L.marker([data.origin.lat, data.origin.lng], { icon: originIcon })
-                .bindPopup('Origin')
-                .bindTooltip('Origin', { permanent: true, direction: 'top', offset: [0, -10] });
-            markers.push(originMarker);
-
-            // Add destination marker
-            const destMarker = L.marker([data.destination.lat, data.destination.lng], { icon: destIcon })
-                .bindPopup('Destination')
-                .bindTooltip('Destination', { permanent: true, direction: 'top', offset: [0, -10] });
-            markers.push(destMarker);
-
-            // Add checkpoint markers
-            const checkpointCoords = [];
-            data.checkpoints.forEach(cp => {
-                checkpointCoords.push([cp.lat, cp.lng]);
-                const marker = L.marker([cp.lat, cp.lng], { icon: checkpointIcon })
-                    .bindPopup(`<b>${cp.label}</b><br>${cp.note || ''}<br>${cp.timestamp}`)
-                    .bindTooltip(cp.label, { permanent: true, direction: 'top', offset: [0, -10] });
-                markers.push(marker);
-            });
-            markerCluster.addLayers(markers);
-
-            // Polyline with status-based color
-            const statusColor = {
-                'Created': 'gray',
-                'In Transit': 'blue',
-                'Out for Delivery': 'orange',
-                'Delivered': 'green'
-            }[data.status] || 'blue';
-            if (checkpointCoords.length > 0) {
-                polyline = L.polyline(checkpointCoords, { color: statusColor, dashArray: '5, 10' }).addTo(map);
-                L.polylineDecorator(polyline, {
-                    patterns: [
-                        {
-                            offset: '50%',
-                            repeat: 100,
-                            symbol: L.Symbol.arrowHead({
-                                pixelSize: 10,
-                                polygon: false,
-                                pathOptions: { stroke: true, color: statusColor }
-                            })
-                        }
-                    ]
-                }).addTo(map);
-            }
-
-            // Update bounds
-            bounds = [
-                [data.origin.lat, data.origin.lng],
-                [data.destination.lat, data.destination.lng],
-                ...checkpointCoords
-            ];
-            map.fitBounds(bounds, { padding: [50, 50] });
-        }
-
-        socket.on('connect', () => {
-            socket.emit('subscribe', '{{ shipment.tracking }}');
-        });
-
-        socket.on('update', (data) => {
-            if (data.tracking === '{{ shipment.tracking }}') {
-                document.getElementById('status').textContent = data.status;
-                const checkpointsDiv = document.getElementById('checkpoints');
-                checkpointsDiv.innerHTML = '';
-                data.checkpoints.forEach(cp => {
-                    const div = document.createElement('div');
-                    div.className = 'checkpoint';
-                    div.innerHTML = `<b>${cp.label}</b><br>${cp.note || ''}<br>${cp.timestamp}`;
-                    checkpointsDiv.appendChild(div);
-                });
-                updateMap({
-                    status: data.status,
-                    origin: { lat: {{ shipment.origin_lat }}, lng: {{ shipment.origin_lng }} },
-                    destination: { lat: {{ shipment.dest_lat }}, lng: {{ shipment.dest_lng }} },
-                    checkpoints: data.checkpoints
-                });
-            }
-        });
-
-        socket.on('error', (data) => {
-            alert(data.message);
-        });
-
-        window.onload = initMap;
-    </script>
-</head>
-<body>
-    <div class="container">
-        <h1>Tracking: {{ shipment.tracking }}</h1>
-        <p><strong>Title:</strong> {{ shipment.title }}</p>
-        <p><strong>Status:</strong> <span id="status">{{ shipment.status }}</span></p>
-        <p><strong>Origin:</strong> Lat {{ shipment.origin_lat }}, Lng {{ shipment.origin_lng }}</p>
-        <p><strong>Destination:</strong> Lat {{ shipment.dest_lat }}, Lng {{ shipment.dest_lng }}</p>
-        <h2>Route Map</h2>
-        <div id="map"></div>
-        <h2>Checkpoints</h2>
-        <div id="checkpoints">
-            {% for checkpoint in checkpoints %}
-            <div class="checkpoint">
-                <b>{{ checkpoint.label }}</b><br>
-                {{ checkpoint.note|default('') }}<br>
-                {{ checkpoint.timestamp }}
-            </div>
-            {% endfor %}
-        </div>
-        <h2>Status History</h2>
-        <div>
-            {% for entry in history %}
-            <div class="checkpoint">
-                {{ entry.status }} at {{ entry.timestamp }}
-            </div>
-            {% endfor %}
-        </div>
-        <p><a href="/">Back to Home</a></p>
-    </div>
-</body>
-</html>
-"""
-
-# templates/admin.html (unchanged)
-"""
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Admin Dashboard</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
-        .container { max-width: 800px; margin: 0 auto; }
-        table { width: 100%; border-collapse: collapse; }
-        th, td { padding: 10px; border: 1px solid #ddd; text-align: left; }
-        th { background-color: #f4f4f4; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Admin Dashboard</h1>
-        <table>
-            <tr>
-                <th>Tracking</th>
-                <th>Title</th>
-                <th>Status</th>
-                <th>Updated At</th>
-            </tr>
-            {% for shipment in shipments %}
-            <tr>
-                <td><a href="/track/{{ shipment.tracking }}">{{ shipment.tracking }}</a></td>
-                <td>{{ shipment.title }}</td>
-                <td>{{ shipment.status }}</td>
-                <td>{{ shipment.updated_at }}</td>
-            </tr>
-            {% endfor %}
-        </table>
-        <p><a href="/">Back to Home</a></p>
-    </div>
-</body>
-</html>
-"""
-
-# templates/error.html (unchanged)
-"""
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Error</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
-        .container { max-width: 600px; margin: 0 auto; text-align: center; }
-        .error { color: red; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Error</h1>
-        <p class="error">{{ error }}</p>
-        <p><a href="/">Back to Home</a></p>
-    </div>
-</body>
-</html>
-"""
+# (Templates remain unchanged from your provided code)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
