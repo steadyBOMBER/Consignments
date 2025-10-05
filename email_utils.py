@@ -5,8 +5,9 @@ from flask import current_app
 from celery import shared_task
 from retry import retry
 import logging
+from datetime import datetime, timedelta
 
-# Configure logging
+# Logging configuration
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -15,89 +16,82 @@ logger = logging.getLogger(__name__)
 
 @shared_task(bind=True, max_retries=3, retry_backoff=True)
 def send_checkpoint_email_async(self, shipment: dict, checkpoint: dict, email: str):
-    """
-    Asynchronously send an email notification for a checkpoint update.
-    
-    Args:
-        shipment (dict): Shipment details (id, tracking, title, status, origin_lat, origin_lng, dest_lat, dest_lng, updated_at).
-        checkpoint (dict): Checkpoint details (id, shipment_id, position, lat, lng, label, note, timestamp).
-        email (str): Recipient email address.
-    """
     try:
-        # Construct email
+        # Convert UTC timestamp to WAT (UTC+1) for display
+        utc_time = datetime.fromisoformat(checkpoint['timestamp'].replace('Z', '+00:00'))
+        wat_time = utc_time + timedelta(hours=1)
+        wat_time_str = wat_time.strftime("%Y-%m-%d %H:%M:%S WAT")
+
         msg = MIMEMultipart('alternative')
-        msg['Subject'] = f"Shipment Update: {shipment['tracking']}"
+        msg['Subject'] = f"Update: Shipment {shipment['tracking']}"
         msg['From'] = current_app.config['SMTP_FROM']
         msg['To'] = email
 
-        # Plain text version
-        text = f"""
-Courier Tracking Update
+        # Plain text email
+        text = f"""Courier Tracking Update
 
 Shipment: {shipment['title']} ({shipment['tracking']})
 Status: {shipment['status']}
-Updated: {shipment['updated_at']}
+Updated: {wat_time_str}
 
 Latest Checkpoint:
-- Label: {checkpoint['label']}
-- Location: ({checkpoint['lat']:.4f}, {checkpoint['lng']:.4f})
-- Time: {checkpoint['timestamp']}
-- Note: {checkpoint['note'] or 'None'}
+Label: {checkpoint['label']}
+Location: ({checkpoint['lat']:.4f}, {checkpoint['lng']:.4f})
+Time: {wat_time_str}
+Note: {checkpoint['note'] or 'None'}
 
-Track: {current_app.config['APP_BASE_URL']}/track/{shipment['tracking']}
+Track your shipment: {current_app.config['APP_BASE_URL']}/track/{shipment['tracking']}
+
+You're receiving this email because you subscribed to updates for this shipment.
+© {datetime.now().year} Courier Tracking Service
 """
-        text_part = MIMEText(text, 'plain')
 
-        # HTML version
-        html = f"""
-<!DOCTYPE html>
-<html>
+        # HTML email with optimized design
+        html = f"""<!DOCTYPE html>
+<html lang="en">
 <head>
     <meta charset="UTF-8">
-    <style>
-        body {{ font-family: Arial, sans-serif; color: #333; line-height: 1.6; }}
-        .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-        .header {{ background: #007bff; color: white; padding: 10px; text-align: center; }}
-        .content {{ padding: 20px; border: 1px solid #ddd; border-radius: 5px; }}
-        .button {{ display: inline-block; padding: 10px 20px; background: #007bff; color: white; text-decoration: none; border-radius: 5px; }}
-        .footer {{ font-size: 12px; color: #777; text-align: center; margin-top: 20px; }}
-    </style>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shipment Update</title>
 </head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h2>Courier Tracking Update</h2>
-        </div>
-        <div class="content">
-            <h3>Shipment: {shipment['title']} ({shipment['tracking']})</h3>
-            <p><strong>Status:</strong> {shipment['status']}</p>
-            <p><strong>Updated:</strong> {shipment['updated_at']}</p>
-            <h4>Latest Checkpoint</h4>
-            <p><strong>Label:</strong> {checkpoint['label']}</p>
-            <p><strong>Location:</strong> ({checkpoint['lat']:.4f}, {checkpoint['lng']:.4f})</p>
-            <p><strong>Time:</strong> {checkpoint['timestamp']}</p>
-            <p><strong>Note:</strong> {checkpoint['note'] or 'None'}</p>
-            <p>
-                <a href="{current_app.config['APP_BASE_URL']}/track/{shipment['tracking']}" class="button">
-                    Track Shipment
-                </a>
-            </p>
-        </div>
-        <div class="footer">
-            <p>You're receiving this email because you're subscribed to updates for this shipment.</p>
-            <p>&copy; {datetime.now().year} Courier Tracking Service</p>
-        </div>
-    </div>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; background-color: #f4f4f4;">
+    <table role="presentation" style="width: 100%; max-width: 600px; margin: 20px auto; border-collapse: collapse; background-color: #ffffff; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+        <tr>
+            <td style="background-color: #007bff; padding: 20px; text-align: center; color: #ffffff;">
+                <h1 style="margin: 0; font-size: 24px; font-weight: 600;">Courier Tracking Update</h1>
+            </td>
+        </tr>
+        <tr>
+            <td style="padding: 20px;">
+                <h2 style="font-size: 20px; margin: 0 0 10px; color: #333333;">Shipment: {shipment['title']} ({shipment['tracking']})</h2>
+                <p style="margin: 5px 0; color: #555555;"><strong>Status:</strong> {shipment['status']}</p>
+                <p style="margin: 5px 0; color: #555555;"><strong>Updated:</strong> {wat_time_str}</p>
+                <h3 style="font-size: 18px; margin: 20px 0 10px; color: #333333;">Latest Checkpoint</h3>
+                <p style="margin: 5px 0; color: #555555;"><strong>Label:</strong> {checkpoint['label']}</p>
+                <p style="margin: 5px 0; color: #555555;"><strong>Location:</strong> ({checkpoint['lat']:.4f}, {checkpoint['lng']:.4f})</p>
+                <p style="margin: 5px 0; color: #555555;"><strong>Time:</strong> {wat_time_str}</p>
+                <p style="margin: 5px 0; color: #555555;"><strong>Note:</strong> {checkpoint['note'] or 'None'}</p>
+                <p style="margin: 20px 0; text-align: center;">
+                    <a href="{current_app.config['APP_BASE_URL']}/track/{shipment['tracking']}" style="display: inline-block; padding: 12px 24px; background-color: #007bff; color: #ffffff; text-decoration: none; border-radius: 4px; font-weight: 600;" role="button" aria-label="Track your shipment">Track Shipment</a>
+                </p>
+            </td>
+        </tr>
+        <tr>
+            <td style="background-color: #f4f4f4; padding: 15px; text-align: center; font-size: 12px; color: #777777;">
+                <p style="margin: 0;">You're receiving this email because you subscribed to updates for this shipment.</p>
+                <p style="margin: 5px 0;">© {datetime.now().year} Courier Tracking Service</p>
+            </td>
+        </tr>
+    </table>
 </body>
 </html>
 """
-        html_part = MIMEText(html, 'html')
 
-        # Attach both parts
+        text_part = MIMEText(text, 'plain')
+        html_part = MIMEText(html, 'html')
         msg.attach(text_part)
         msg.attach(html_part)
 
-        # Send email with retry
         @retry(tries=3, delay=2, backoff=2, exceptions=(smtplib.SMTPException,))
         def send_email():
             with smtplib.SMTP(current_app.config['SMTP_HOST'], current_app.config['SMTP_PORT']) as server:
