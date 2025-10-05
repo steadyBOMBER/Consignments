@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Track Shipment {{ shipment.tracking }}</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.fullscreen@2.0.0/Control.FullScreen.css" />
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        .checkpoint { margin: 10px 0; padding: 10px; border-bottom: 1px solid #ddd; }
+        .status { font-weight: bold; }
+        #map { height: 400px; margin: 20px 0; }
+        .leaflet-tooltip { font-size: 12px; }
+    </style>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+    <script src="https://unpkg.com/leaflet.fullscreen@2.0.0/Control.FullScreen.js"></script>
+    <script src="/static/socket.io.min.js"></script>
+    <script>
+        const socket = io();
+        let map, markerCluster, markers = [], polyline;
+
+        function initMap() {
+            map = L.map('map', {
+                zoomControl: true, // Enable default zoom controls
+                fullscreenControl: true // Enable fullscreen control
+            }).setView([{{ shipment.origin_lat }}, {{ shipment.origin_lng }}], 5);
+
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+                maxZoom: 18
+            }).addTo(map);
+
+            // Add scale control
+            L.control.scale({ metric: true, imperial: true }).addTo(map);
+
+            // Initialize marker cluster group
+            markerCluster = L.markerClusterGroup({
+                maxClusterRadius: 50,
+                iconCreateFunction: function(cluster) {
+                    return L.divIcon({
+                        html: `<b>${cluster.getChildCount()}</b>`,
+                        className: 'marker-cluster',
+                        iconSize: [40, 40]
+                    });
+                }
+            });
+            map.addLayer(markerCluster);
+
+            updateMap({
+                origin: { lat: {{ shipment.origin_lat }}, lng: {{ shipment.origin_lng }} },
+                destination: { lat: {{ shipment.dest_lat }}, lng: {{ shipment.dest_lng }} },
+                checkpoints: [
+                    {% for cp in checkpoints %}
+                    { lat: {{ cp.lat }}, lng: {{ cp.lng }}, label: "{{ cp.label }}", note: "{{ cp.note|default('') }}", timestamp: "{{ cp.timestamp }}" },
+                    {% endfor %}
+                ]
+            });
+        }
+
+        function updateMap(data) {
+            // Clear existing markers and polyline
+            markerCluster.clearLayers();
+            markers = [];
+            if (polyline) map.removeLayer(polyline);
+
+            // Custom icons
+            const originIcon = L.icon({
+                iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-green.png',
+                iconSize: [25, 41],
+                iconAnchor: [12, 41],
+                popupAnchor: [1, -34]
+            });
+            const destIcon = L.icon({
+                iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
+                iconSize: [25, 41],
+                iconAnchor: [12, 41],
+                popupAnchor: [1, -34]
+            });
+            const checkpointIcon = L.icon({
+                iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-blue.png',
+                iconSize: [25, 41],
+                iconAnchor: [12, 41],
+                popupAnchor: [1, -34]
+            });
+
+            // Add origin marker
+            const originMarker = L.marker([data.origin.lat, data.origin.lng], { icon: originIcon })
+                .bindPopup('Origin')
+                .bindTooltip('Origin', { permanent: true, direction: 'top', offset: [0, -10] });
+            markers.push(originMarker);
+
+            // Add destination marker
+            const destMarker = L.marker([data.destination.lat, data.destination.lng], { icon: destIcon })
+                .bindPopup('Destination')
+                .bindTooltip('Destination', { permanent: true, direction: 'top', offset: [0, -10] });
+            markers.push(destMarker);
+
+            // Add checkpoint markers to cluster group
+            const checkpointCoords = [];
+            data.checkpoints.forEach(cp => {
+                checkpointCoords.push([cp.lat, cp.lng]);
+                const marker = L.marker([cp.lat, cp.lng], { icon: checkpointIcon })
+                    .bindPopup(`<b>${cp.label}</b><br>${cp.note || ''}<br>${cp.timestamp}`)
+                    .bindTooltip(cp.label, { permanent: true, direction: 'top', offset: [0, -10] });
+                markers.push(marker);
+            });
+            markerCluster.addLayers(markers);
+
+            // Draw polyline with arrows
+            if (checkpointCoords.length > 0) {
+                polyline = L.polyline(checkpointCoords, { color: 'blue', dashArray: '5, 10' }).addTo(map);
+                // Add arrowheads
+                const decorator = L.polylineDecorator(polyline, {
+                    patterns: [
+                        {
+                            offset: '50%',
+                            repeat: 100,
+                            symbol: L.Symbol.arrowHead({
+                                pixelSize: 10,
+                                polygon: false,
+                                pathOptions: { stroke: true, color: 'blue' }
+                            })
+                        }
+                    ]
+                }).addTo(map);
+            }
+
+            // Fit map to bounds
+            const bounds = [
+                [data.origin.lat, data.origin.lng],
+                [data.destination.lat, data.destination.lng],
+                ...checkpointCoords
+            ];
+            map.fitBounds(bounds, { padding: [50, 50] });
+        }
+
+        socket.on('connect', () => {
+            socket.emit('subscribe', '{{ shipment.tracking }}');
+        });
+
+        socket.on('update', (data) => {
+            if (data.tracking === '{{ shipment.tracking }}') {
+                document.getElementById('status').textContent = data.status;
+                const checkpointsDiv = document.getElementById('checkpoints');
+                checkpointsDiv.innerHTML = '';
+                data.checkpoints.forEach(cp => {
+                    const div = document.createElement('div');
+                    div.className = 'checkpoint';
+                    div.innerHTML = `<b>${cp.label}</b><br>${cp.note || ''}<br>${cp.timestamp}`;
+                    checkpointsDiv.appendChild(div);
+                });
+                updateMap({
+                    origin: { lat: {{ shipment.origin_lat }}, lng: {{ shipment.origin_lng }} },
+                    destination: { lat: {{ shipment.dest_lat }}, lng: {{ shipment.dest_lng }} },
+                    checkpoints: data.checkpoints
+                });
+            }
+        });
+
+        socket.on('error', (data) => {
+            alert(data.message);
+        });
+
+        window.onload = initMap;
+    </script>
+</head>
+<body>
+    <div class="container">
+        <h1>Tracking: {{ shipment.tracking }}</h1>
+        <p><strong>Title:</strong> {{ shipment.title }}</p>
+        <p><strong>Status:</strong> <span id="status">{{ shipment.status }}</span></p>
+        <p><strong>Origin:</strong> Lat {{ shipment.origin_lat }}, Lng {{ shipment.origin_lng }}</p>
+        <p><strong>Destination:</strong> Lat {{ shipment.dest_lat }}, Lng {{ shipment.dest_lng }}</p>
+        <h2>Route Map</h2>
+        <div id="map"></div>
+        <h2>Checkpoints</h2>
+        <div id="checkpoints">
+            {% for checkpoint in checkpoints %}
+            <div class="checkpoint">
+                <b>{{ checkpoint.label }}</b><br>
+                {{ checkpoint.note|default('') }}<br>
+                {{ checkpoint.timestamp }}
+            </div>
+            {% endfor %}
+        </div>
+        <h2>Status History</h2>
+        <div>
+            {% for entry in history %}
+            <div class="checkpoint">
+                {{ entry.status }} at {{ entry.timestamp }}
+            </div>
+            {% endfor %}
+        </div>
+        <p><a href="/">Back to Home</a></p>
+    </div>
+</body>
+  </html>
