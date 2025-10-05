@@ -1,6 +1,7 @@
 import os
 import threading
 import logging
+import random
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 
@@ -41,7 +42,7 @@ sentry_sdk.init(
 # --- Configuration and Initialization ---
 def validate_config():
     """Validate required environment variables."""
-    required_envs = ["SECRET_KEY", "JWT_SECRET_KEY", "ADMIN_PASSWORD", "SENTRY_DSN", "TELEGRAM_TOKEN"]
+    required_envs = ["SECRET_KEY", "JWT_SECRET_KEY", "ADMIN_PASSWORD", "SENTRY_DSN", "TELEGRAM_TOKEN", "TELEGRAM_ADMIN_TOKEN"]
     for env in required_envs:
         if not os.environ.get(env):
             logger.error(f"Missing required environment variable: {env}")
@@ -80,7 +81,8 @@ app.config.from_mapping(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
     PERMANENT_SESSION_LIFETIME=timedelta(minutes=30),
-    TELEGRAM_TOKEN=os.environ.get("TELEGRAM_TOKEN")
+    TELEGRAM_TOKEN=os.environ.get("TELEGRAM_TOKEN"),
+    TELEGRAM_ADMIN_TOKEN=os.environ.get("TELEGRAM_ADMIN_TOKEN")
 )
 
 # Validate configuration
@@ -231,7 +233,7 @@ def set_security_headers(response):
         "X-Frame-Options": "DENY",
         "X-Content-Type-Options": "nosniff",
         "Referrer-Policy": "no-referrer-when-downgrade",
-        "Content-Security-Policy": "default-src 'self' 'unsafe-inline' data:; script-src 'self' https://unpkg.com https://cdnjs.cloudflare.com; style-src 'self' https://unpkg.com;"
+        "Content-Security-Policy": "default-src 'self' 'unsafe-inline' data:; script-src 'self' https://unpkg.com https://cdnjs.cloudflare.com; style-src 'self' https://unpkg.com https://cdnjs.cloudflare.com;"
     }
     for k, v in headers.items():
         response.headers.setdefault(k, v)
@@ -315,7 +317,7 @@ def handle_update(update_json):
                     status="Created"
                 )
                 db.session.add(shipment)
-                db.session.flush()  # Get shipment ID before committing
+                db.session.flush()
                 history = ShipmentStatusHistory(shipment_id=shipment.id, status="Created")
                 db.session.add(history)
                 db.session.commit()
@@ -377,17 +379,41 @@ def handle_update(update_json):
                 logger.error(f"Failed to add checkpoint via Telegram: {e}")
                 send_message(chat_id, "Error adding checkpoint")
 
-        elif cmd == "list":
-            ships = Shipment.query.order_by(Shipment.updated_at.desc()).limit(20).all()
-            if not ships:
-                send_message(chat_id, "No shipments found.")
-                return
-            msg = "Recent shipments:\n" + "\n".join([f"{s.tracking}: {s.title} ({s.status})" for s in ships])
-            send_message(chat_id, msg)
-
-        elif cmd == "remove_sub":
+        elif cmd == "subscribe":
             if "|" not in payload:
-                send_message(chat_id, "Usage: /remove_sub TRACKING|email")
+                send_message(chat_id, "Usage: /subscribe TRACKING|email")
+                return
+            tracking, email = payload.split("|", 1)
+            shipment = Shipment.query.filter_by(tracking=tracking.strip()).first()
+            if not shipment:
+                send_message(chat_id, "Shipment not found")
+                return
+            email = email.strip().lower()
+            if not email or "@" not in email:
+                send_message(chat_id, "Invalid email")
+                return
+            try:
+                subscriber = Subscriber.query.filter_by(shipment_id=shipment.id, email=email).first()
+                if subscriber:
+                    if not subscriber.is_active:
+                        subscriber.is_active = True
+                        db.session.commit()
+                        send_message(chat_id, f"Reactivated subscription for {email}")
+                    else:
+                        send_message(chat_id, f"{email} is already subscribed")
+                else:
+                    subscriber = Subscriber(shipment_id=shipment.id, email=email)
+                    db.session.add(subscriber)
+                    db.session.commit()
+                    send_message(chat_id, f"Subscribed {email} to {tracking}")
+            except Exception as e:
+                db.session.rollback()
+                logger.error(f"Failed to subscribe via Telegram: {e}")
+                send_message(chat_id, "Error subscribing")
+
+        elif cmd == "unsubscribe":
+            if "|" not in payload:
+                send_message(chat_id, "Usage: /unsubscribe TRACKING|email")
                 return
             tracking, email = payload.split("|", 1)
             shipment = Shipment.query.filter_by(tracking=tracking.strip()).first()
@@ -401,11 +427,76 @@ def handle_update(update_json):
             try:
                 subscriber.is_active = False
                 db.session.commit()
-                send_message(chat_id, f"Removed {email}")
+                send_message(chat_id, f"Unsubscribed {email}")
             except Exception as e:
                 db.session.rollback()
-                logger.error(f"Failed to remove subscriber via Telegram: {e}")
-                send_message(chat_id, "Error removing subscriber")
+                logger.error(f"Failed to unsubscribe via Telegram: {e}")
+                send_message(chat_id, "Error unsubscribing")
+
+        elif cmd == "history":
+            t = payload.split()[0] if payload else ""
+            if not t:
+                send_message(chat_id, "Usage: /history <TRACKING>")
+                return
+            shipment = Shipment.query.filter_by(tracking=t).first()
+            if not shipment:
+                send_message(chat_id, f"Tracking {t} not found.")
+                return
+            history = ShipmentStatusHistory.query.filter_by(shipment_id=shipment.id).order_by(ShipmentStatusHistory.timestamp).all()
+            if not history:
+                send_message(chat_id, "No status history found.")
+                return
+            msg = f"Status history for {shipment.tracking}:\n" + "\n".join([f"{h.status} at {h.timestamp}" for h in history])
+            send_message(chat_id, msg)
+
+        elif cmd == "setstatus":
+            if "|" not in payload:
+                send_message(chat_id, "Usage: /setstatus TRACKING|status|admin_token")
+                return
+            p = payload.split("|")
+            tracking = p[0].strip()
+            status = p[1].strip() if len(p) > 1 else ""
+            admin_token = p[2].strip() if len(p) > 2 else ""
+            if admin_token != app.config["TELEGRAM_ADMIN_TOKEN"]:
+                send_message(chat_id, "Invalid admin token")
+                return
+            shipment = Shipment.query.filter_by(tracking=tracking).first()
+            if not shipment:
+                send_message(chat_id, "Shipment not found")
+                return
+            if not status:
+                send_message(chat_id, "Invalid status")
+                return
+            try:
+                shipment.status = status
+                shipment.updated_at = datetime.utcnow()
+                history = ShipmentStatusHistory(shipment_id=shipment.id, status=status)
+                db.session.add(history)
+                db.session.commit()
+                socketio.emit("update", {
+                    "tracking": shipment.tracking,
+                    "status": shipment.status,
+                    "checkpoints": [{
+                        "lat": cp.lat,
+                        "lng": cp.lng,
+                        "label": cp.label,
+                        "note": cp.note,
+                        "timestamp": cp.timestamp
+                    } for cp in Checkpoint.query.filter_by(shipment_id=shipment.id).order_by(Checkpoint.position).all()]
+                }, broadcast=True)
+                send_message(chat_id, f"Updated status of {tracking} to {status}")
+            except Exception as e:
+                db.session.rollback()
+                logger.error(f"Failed to set status via Telegram: {e}")
+                send_message(chat_id, "Error updating status")
+
+        elif cmd == "list":
+            ships = Shipment.query.order_by(Shipment.updated_at.desc()).limit(20).all()
+            if not ships:
+                send_message(chat_id, "No shipments found.")
+                return
+            msg = "Recent shipments:\n" + "\n".join([f"{s.tracking}: {s.title} ({s.status})" for s in ships])
+            send_message(chat_id, msg)
 
         elif cmd == "simulate":
             if "|" not in payload:
@@ -421,22 +512,43 @@ def handle_update(update_json):
                 return
             def worker(shipment_id, steps, interval):
                 try:
+                    shipment = Shipment.query.get(shipment_id)
+                    if not shipment:
+                        return
+                    status_stages = [
+                        ("In Transit", 1 / steps),
+                        ("Out for Delivery", (steps - 1) / steps),
+                        ("Delivered", 1.0)
+                    ]
                     for i in range(steps):
-                        shipment = Shipment.query.get(shipment_id)
-                        if not shipment:
-                            break
                         frac = (i + 1) / float(steps)
+                        # Add random variation to coordinates (up to 0.05 degrees)
                         lat = shipment.origin_lat + (shipment.dest_lat - shipment.origin_lat) * frac
                         lng = shipment.origin_lng + (shipment.dest_lng - shipment.origin_lng) * frac
+                        lat += random.uniform(-0.05, 0.05)
+                        lng += random.uniform(-0.05, 0.05)
+                        # Ensure coordinates stay within valid ranges
+                        lat = max(min(lat, 90), -90)
+                        lng = max(min(lng, 180), -180)
                         position = Checkpoint.query.filter_by(shipment_id=shipment_id).count()
+                        label = f"Checkpoint {i + 1}/{steps}"
+                        note = f"Simulated at {frac*100:.1f}% of journey"
                         checkpoint = Checkpoint(
                             shipment_id=shipment_id,
                             position=position,
                             lat=lat,
                             lng=lng,
-                            label=f"Simulated {i + 1}/{steps}"
+                            label=label,
+                            note=note
                         )
                         shipment.updated_at = datetime.utcnow()
+                        # Update status based on progress
+                        for status, threshold in status_stages:
+                            if frac >= threshold and shipment.status != status:
+                                shipment.status = status
+                                history = ShipmentStatusHistory(shipment_id=shipment.id, status=status)
+                                db.session.add(history)
+                                break
                         db.session.add(checkpoint)
                         db.session.commit()
                         send_checkpoint_email_task.delay(shipment_id, checkpoint.id)
@@ -788,7 +900,7 @@ def handle_subscribe(tracking):
 </html>
 """
 
-# templates/track.html (updated with enhanced map features)
+# templates/track.html (updated with custom markers and controls)
 """
 <!DOCTYPE html>
 <html>
@@ -800,6 +912,7 @@ def handle_subscribe(tracking):
     <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
     <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
     <link rel="stylesheet" href="https://unpkg.com/leaflet.fullscreen@2.0.0/Control.FullScreen.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet-control-geocoder/1.13.0/leaflet-control-geocoder.min.css" />
     <style>
         body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
         .container { max-width: 800px; margin: 0 auto; }
@@ -807,30 +920,58 @@ def handle_subscribe(tracking):
         .status { font-weight: bold; }
         #map { height: 400px; margin: 20px 0; }
         .leaflet-tooltip { font-size: 12px; }
+        .custom-control { background: white; padding: 5px; border: 1px solid #ccc; }
     </style>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
     <script src="https://unpkg.com/leaflet.fullscreen@2.0.0/Control.FullScreen.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet-control-geocoder/1.13.0/leaflet-control-geocoder.min.js"></script>
     <script src="/static/socket.io.min.js"></script>
     <script>
         const socket = io();
-        let map, markerCluster, markers = [], polyline;
+        let map, markerCluster, markers = [], polyline, bounds;
 
         function initMap() {
             map = L.map('map', {
-                zoomControl: true, // Enable default zoom controls
-                fullscreenControl: true // Enable fullscreen control
+                zoomControl: true,
+                fullscreenControl: true
             }).setView([{{ shipment.origin_lat }}, {{ shipment.origin_lng }}], 5);
 
-            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            // Base layers
+            const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
                 attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
                 maxZoom: 18
             }).addTo(map);
+            const satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+                attribution: 'Tiles &copy; Esri',
+                maxZoom: 18
+            });
 
-            // Add scale control
+            // Layers control
+            L.control.layers({
+                "OpenStreetMap": osm,
+                "Satellite": satellite
+            }).addTo(map);
+
+            // Scale control
             L.control.scale({ metric: true, imperial: true }).addTo(map);
 
-            // Initialize marker cluster group
+            // Locate control
+            L.Control.geocoder({ collapsed: false, placeholder: 'Search location...' }).addTo(map);
+
+            // Reset view control
+            L.Control.ResetView = L.Control.extend({
+                options: { position: 'topright' },
+                onAdd: function(map) {
+                    const container = L.DomUtil.create('div', 'leaflet-bar custom-control');
+                    container.innerHTML = '<button onclick="resetView()">Reset View</button>';
+                    return container;
+                }
+            });
+            L.control.resetView = function(opts) { return new L.Control.ResetView(opts); };
+            L.control.resetView().addTo(map);
+
+            // Marker cluster group
             markerCluster = L.markerClusterGroup({
                 maxClusterRadius: 50,
                 iconCreateFunction: function(cluster) {
@@ -844,6 +985,7 @@ def handle_subscribe(tracking):
             map.addLayer(markerCluster);
 
             updateMap({
+                status: '{{ shipment.status }}',
                 origin: { lat: {{ shipment.origin_lat }}, lng: {{ shipment.origin_lng }} },
                 destination: { lat: {{ shipment.dest_lat }}, lng: {{ shipment.dest_lng }} },
                 checkpoints: [
@@ -854,30 +996,37 @@ def handle_subscribe(tracking):
             });
         }
 
+        function resetView() {
+            if (bounds) map.fitBounds(bounds, { padding: [50, 50] });
+        }
+
         function updateMap(data) {
             // Clear existing markers and polyline
             markerCluster.clearLayers();
             markers = [];
             if (polyline) map.removeLayer(polyline);
 
-            // Custom icons
-            const originIcon = L.icon({
-                iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-green.png',
-                iconSize: [25, 41],
-                iconAnchor: [12, 41],
-                popupAnchor: [1, -34]
+            // Custom SVG icons
+            const originIcon = L.divIcon({
+                html: '<svg width="32" height="32" viewBox="0 0 24 24"><path fill="green" d="M20 10.5v.5h-16v-.5c0-2.5 1.5-4.7 3.7-5.7l-.7-2.3h10l-.7 2.3c2.2 1 3.7 3.2 3.7 5.7zM4 18h16v2h-16zM10 22h4v2h-4z"/></svg>',
+                className: 'custom-icon',
+                iconSize: [32, 32],
+                iconAnchor: [16, 32],
+                popupAnchor: [0, -32]
             });
-            const destIcon = L.icon({
-                iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
-                iconSize: [25, 41],
-                iconAnchor: [12, 41],
-                popupAnchor: [1, -34]
+            const destIcon = L.divIcon({
+                html: '<svg width="32" height="32" viewBox="0 0 24 24"><path fill="red" d="M12 2l-10 10h3v10h14v-10h3l-10-10zm0 2.83l6 6v8.17h-4v-4h-4v4h-4v-8.17l6-6z"/></svg>',
+                className: 'custom-icon',
+                iconSize: [32, 32],
+                iconAnchor: [16, 32],
+                popupAnchor: [0, -32]
             });
-            const checkpointIcon = L.icon({
-                iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-blue.png',
-                iconSize: [25, 41],
-                iconAnchor: [12, 41],
-                popupAnchor: [1, -34]
+            const checkpointIcon = L.divIcon({
+                html: '<svg width="32" height="32" viewBox="0 0 24 24"><path fill="blue" d="M19 3h-14c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2v-14c0-1.1-.9-2-2-2zm-1 16h-12v-12h12v12z"/></svg>',
+                className: 'custom-icon',
+                iconSize: [32, 32],
+                iconAnchor: [16, 32],
+                popupAnchor: [0, -32]
             });
 
             // Add origin marker
@@ -892,7 +1041,7 @@ def handle_subscribe(tracking):
                 .bindTooltip('Destination', { permanent: true, direction: 'top', offset: [0, -10] });
             markers.push(destMarker);
 
-            // Add checkpoint markers to cluster group
+            // Add checkpoint markers
             const checkpointCoords = [];
             data.checkpoints.forEach(cp => {
                 checkpointCoords.push([cp.lat, cp.lng]);
@@ -903,11 +1052,16 @@ def handle_subscribe(tracking):
             });
             markerCluster.addLayers(markers);
 
-            // Draw polyline with arrows
+            // Polyline with status-based color
+            const statusColor = {
+                'Created': 'gray',
+                'In Transit': 'blue',
+                'Out for Delivery': 'orange',
+                'Delivered': 'green'
+            }[data.status] || 'blue';
             if (checkpointCoords.length > 0) {
-                polyline = L.polyline(checkpointCoords, { color: 'blue', dashArray: '5, 10' }).addTo(map);
-                // Add arrowheads
-                const decorator = L.polylineDecorator(polyline, {
+                polyline = L.polyline(checkpointCoords, { color: statusColor, dashArray: '5, 10' }).addTo(map);
+                L.polylineDecorator(polyline, {
                     patterns: [
                         {
                             offset: '50%',
@@ -915,15 +1069,15 @@ def handle_subscribe(tracking):
                             symbol: L.Symbol.arrowHead({
                                 pixelSize: 10,
                                 polygon: false,
-                                pathOptions: { stroke: true, color: 'blue' }
+                                pathOptions: { stroke: true, color: statusColor }
                             })
                         }
                     ]
                 }).addTo(map);
             }
 
-            // Fit map to bounds
-            const bounds = [
+            // Update bounds
+            bounds = [
                 [data.origin.lat, data.origin.lng],
                 [data.destination.lat, data.destination.lng],
                 ...checkpointCoords
@@ -947,6 +1101,7 @@ def handle_subscribe(tracking):
                     checkpointsDiv.appendChild(div);
                 });
                 updateMap({
+                    status: data.status,
                     origin: { lat: {{ shipment.origin_lat }}, lng: {{ shipment.origin_lng }} },
                     destination: { lat: {{ shipment.dest_lat }}, lng: {{ shipment.dest_lng }} },
                     checkpoints: data.checkpoints
