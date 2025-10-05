@@ -14,95 +14,122 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-@shared_task(bind=True, max_retries=3, retry_backoff=True)
+@shared_task(bind=True, max_retries=3, retry_backoff=2, retry_jitter=True)
 def send_checkpoint_email_async(self, shipment: dict, checkpoint: dict, email: str):
+    """
+    Asynchronously send an email notification for a shipment checkpoint update using Gmail SMTP.
+    """
     try:
-        # Convert UTC timestamp to WAT (UTC+1) for display
+        # Convert UTC timestamp to WAT (UTC+1)
         utc_time = datetime.fromisoformat(checkpoint['timestamp'].replace('Z', '+00:00'))
         wat_time = utc_time + timedelta(hours=1)
-        wat_time_str = wat_time.strftime("%Y-%m-%d %H:%M:%S WAT")
+        wat_time_str = wat_time.strftime("%Y-%m-%d %I:%M:%S %p WAT")
 
+        # Log SMTP configuration for debugging
+        logger.debug(f"Sending email with SMTP_HOST={current_app.config['SMTP_HOST']}, SMTP_PORT={current_app.config['SMTP_PORT']}, SMTP_USER={current_app.config['SMTP_USER']}")
+
+        # Create MIME message
         msg = MIMEMultipart('alternative')
-        msg['Subject'] = f"Update: Shipment {shipment['tracking']}"
+        msg['Subject'] = f"Update: Shipment {shipment['tracking']} - {checkpoint['label']}"
         msg['From'] = current_app.config['SMTP_FROM']
         msg['To'] = email
 
-        # Plain text email
+        # Plain text version
         text = f"""Courier Tracking Update
 
 Shipment: {shipment['title']} ({shipment['tracking']})
 Status: {shipment['status']}
 Updated: {wat_time_str}
 
-Latest Checkpoint:
-Label: {checkpoint['label']}
-Location: ({checkpoint['lat']:.4f}, {checkpoint['lng']:.4f})
-Time: {wat_time_str}
-Note: {checkpoint['note'] or 'None'}
+Checkpoint:
+- Label: {checkpoint['label']}
+- Location: ({checkpoint['lat']:.4f}, {checkpoint['lng']:.4f})
+- Note: {checkpoint['note'] or 'None'}
 
-Track your shipment: {current_app.config['APP_BASE_URL']}/track/{shipment['tracking']}
-
-You're receiving this email because you subscribed to updates for this shipment.
-© {datetime.now().year} Courier Tracking Service
+Track: {current_app.config['APP_BASE_URL']}/track/{shipment['tracking']}
+Unsubscribe: {current_app.config['APP_BASE_URL']}/unsubscribe/{shipment['tracking']}?email={email}
 """
+        text_part = MIMEText(text, 'plain')
 
-        # HTML email with optimized design
+        # HTML version with Tailwind CSS
         html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Shipment Update</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
 </head>
-<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; background-color: #f4f4f4;">
-    <table role="presentation" style="width: 100%; max-width: 600px; margin: 20px auto; border-collapse: collapse; background-color: #ffffff; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-        <tr>
-            <td style="background-color: #007bff; padding: 20px; text-align: center; color: #ffffff;">
-                <h1 style="margin: 0; font-size: 24px; font-weight: 600;">Courier Tracking Update</h1>
-            </td>
-        </tr>
-        <tr>
-            <td style="padding: 20px;">
-                <h2 style="font-size: 20px; margin: 0 0 10px; color: #333333;">Shipment: {shipment['title']} ({shipment['tracking']})</h2>
-                <p style="margin: 5px 0; color: #555555;"><strong>Status:</strong> {shipment['status']}</p>
-                <p style="margin: 5px 0; color: #555555;"><strong>Updated:</strong> {wat_time_str}</p>
-                <h3 style="font-size: 18px; margin: 20px 0 10px; color: #333333;">Latest Checkpoint</h3>
-                <p style="margin: 5px 0; color: #555555;"><strong>Label:</strong> {checkpoint['label']}</p>
-                <p style="margin: 5px 0; color: #555555;"><strong>Location:</strong> ({checkpoint['lat']:.4f}, {checkpoint['lng']:.4f})</p>
-                <p style="margin: 5px 0; color: #555555;"><strong>Time:</strong> {wat_time_str}</p>
-                <p style="margin: 5px 0; color: #555555;"><strong>Note:</strong> {checkpoint['note'] or 'None'}</p>
-                <p style="margin: 20px 0; text-align: center;">
-                    <a href="{current_app.config['APP_BASE_URL']}/track/{shipment['tracking']}" style="display: inline-block; padding: 12px 24px; background-color: #007bff; color: #ffffff; text-decoration: none; border-radius: 4px; font-weight: 600;" role="button" aria-label="Track your shipment">Track Shipment</a>
-                </p>
-            </td>
-        </tr>
-        <tr>
-            <td style="background-color: #f4f4f4; padding: 15px; text-align: center; font-size: 12px; color: #777777;">
-                <p style="margin: 0;">You're receiving this email because you subscribed to updates for this shipment.</p>
-                <p style="margin: 5px 0;">© {datetime.now().year} Courier Tracking Service</p>
-            </td>
-        </tr>
-    </table>
+<body class="bg-gray-100 font-sans">
+    <div class="max-w-2xl mx-auto bg-white shadow-md rounded-lg overflow-hidden">
+        <!-- Header -->
+        <div class="bg-blue-600 text-white text-center py-4">
+            <img src="{current_app.config['APP_BASE_URL']}/static/logo.png" alt="Courier Logo" class="h-12 mx-auto" style="max-width: 150px;">
+            <h1 class="text-2xl font-bold mt-2">Shipment Update</h1>
+        </div>
+        <!-- Content -->
+        <div class="p-6">
+            <h2 class="text-xl font-semibold text-gray-800">Shipment: {shipment['title']} ({shipment['tracking']})</h2>
+            <div class="mt-4 space-y-2">
+                <p><span class="font-medium text-gray-700">Status:</span> {shipment['status']}</p>
+                <p><span class="font-medium text-gray-700">Updated:</span> {wat_time_str}</p>
+            </div>
+            <h3 class="text-lg font-semibold text-gray-800 mt-6">Latest Checkpoint</h3>
+            <div class="mt-2 space-y-2">
+                <p><span class="font-medium text-gray-700">Label:</span> {checkpoint['label']}</p>
+                <p><span class="font-medium text-gray-700">Location:</span> ({checkpoint['lat']:.4f}, {checkpoint['lng']:.4f})</p>
+                <p><span class="font-medium text-gray-700">Note:</span> {checkpoint['note'] or 'None'}</p>
+            </div>
+            <div class="mt-6 text-center">
+                <a href="{current_app.config['APP_BASE_URL']}/track/{shipment['tracking']}" class="inline-block bg-blue-600 text-white font-semibold py-2 px-4 rounded hover:bg-blue-700">
+                    Track Shipment
+                </a>
+            </div>
+        </div>
+        <!-- Footer -->
+        <div class="bg-gray-200 text-gray-600 text-center py-4 text-sm">
+            <p>You're receiving this email because you're subscribed to updates for this shipment.</p>
+            <p><a href="{current_app.config['APP_BASE_URL']}/unsubscribe/{shipment['tracking']}?email={email}" class="text-blue-600 hover:underline">Unsubscribe</a></p>
+            <p>&copy; {datetime.now().year} Courier Tracking Service. All rights reserved.</p>
+        </div>
+    </div>
 </body>
 </html>
 """
-
-        text_part = MIMEText(text, 'plain')
         html_part = MIMEText(html, 'html')
+
+        # Attach parts
         msg.attach(text_part)
         msg.attach(html_part)
 
-        @retry(tries=3, delay=2, backoff=2, exceptions=(smtplib.SMTPException,))
+        @retry(tries=3, delay=2, backoff=2, exceptions=(smtplib.SMTPException, smtplib.SMTPServerDisconnected))
         def send_email():
-            with smtplib.SMTP(current_app.config['SMTP_HOST'], current_app.config['SMTP_PORT']) as server:
-                server.starttls()
-                server.login(current_app.config['SMTP_USER'], current_app.config['SMTP_PASS'])
-                server.send_message(msg)
-                logger.info(f"Sent email to {email} for checkpoint {checkpoint['id']} of shipment {shipment['tracking']}")
+            try:
+                # Use SMTP_SSL for Gmail
+                with smtplib.SMTP(current_app.config['SMTP_HOST'], current_app.config['SMTP_PORT'], timeout=10) as server:
+                    server.starttls()
+                    server.login(current_app.config['SMTP_USER'], current_app.config['SMTP_PASS'])
+                    server.send_message(msg)
+                    logger.info(f"Sent email to {email} for checkpoint {checkpoint['id']} of shipment {shipment['tracking']}")
+            except smtplib.SMTPAuthenticationError:
+                logger.error(f"SMTP authentication failed for {email}: Invalid credentials")
+                raise
+            except smtplib.SMTPConnectError:
+                logger.error(f"SMTP connection failed for {email}: Server unreachable")
+                raise
+            except smtplib.SMTPException as e:
+                logger.error(f"SMTP error sending email to {email}: {e}")
+                raise
 
         send_email()
+    except smtplib.SMTPAuthenticationError:
+        logger.error(f"Authentication error sending email to {email} for checkpoint {checkpoint['id']}: SMTP credentials invalid")
+        raise self.retry(exc=Exception("SMTP authentication failed"))
+    except smtplib.SMTPConnectError:
+        logger.error(f"Connection error sending email to {email} for checkpoint {checkpoint['id']}: SMTP server unreachable")
+        raise self.retry(exc=Exception("SMTP server unreachable"))
     except smtplib.SMTPException as e:
-        logger.error(f"Failed to send email to {email} for checkpoint {checkpoint['id']}: {e}")
+        logger.error(f"SMTP error sending email to {email} for checkpoint {checkpoint['id']}: {e}")
         raise self.retry(exc=e)
     except Exception as e:
         logger.error(f"Unexpected error sending email to {email} for checkpoint {checkpoint['id']}: {e}")
