@@ -13,6 +13,7 @@ werkzeug==3.0.3
 retry==0.9.2
 sentry-sdk==1.40.0
 requests==2.31.0
-gunicorn==21.2.0  # For production server
-eventlet==0.33.3  # For WebSocket support in Gunicorn
-python-dotenv==1.0.0  # For loading .env
+gunicorn==21.2.0
+eventlet==0.33.3
+python-dotenv==1.0.0
+cryptography==36.0.2  # Pin to avoid Rust dependency
