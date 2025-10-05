@@ -16,3 +16,4 @@ gunicorn==21.2.0
 eventlet==0.33.3
 python-dotenv==1.0.0
 cryptography==36.0.2  # Pin to avoid Rust
+gevent==23.9.1
