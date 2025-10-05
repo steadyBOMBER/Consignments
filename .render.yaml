@@ -3,23 +3,27 @@ services:
     name: courier-tracking-web
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: bash build.sh
     startCommand: gunicorn app:app -k eventlet -w 4 --threads 2
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.3
       - key: CARGO_HOME
         value: /tmp/cargo
+      - key: RUSTUP_HOME
+        value: /tmp/rustup
+      - key: PATH
+        value: /tmp/cargo/bin:/opt/render/project/src/.venv/bin:/usr/local/bin:/usr/bin:/bin
       - key: SECRET_KEY
-        value: your-secret-key
+        value: fe25c3f6d1d47f98b837b4a2a94dcae8914cdef80b273b36c12449ed1d6ef8a7
       - key: JWT_SECRET_KEY
-        value: your-jwt-secret
+        value: u1zH9@eN7qVf!3Lp$yRk*5Gm^aTbW8Xs+JcZ2oKdQfL6vPn#B4iMhEj0rUtY
       - key: ADMIN_PASSWORD
-        value: secure-password
+        value: Biggerboy
       - key: SENTRY_DSN
         value: your-sentry-dsn
       - key: TELEGRAM_TOKEN
-        value: your-telegram-token
+        value: 8308468014:AAGwOlSKbaDI6fR2wEBWAkSWy_FDN4YZCZU
       - key: TELEGRAM_ADMIN_TOKEN
         value: your-admin-token
       - key: REDIS_URL
@@ -28,57 +32,55 @@ services:
           name: courier-tracking-redis
           property: connectionString
       - key: DATABASE_URL
-        fromService:
-          type: pgsql
-          name: courier-tracking-db
-          property: connectionString
+        value: postgresql://gigga_user:1x60BsERZ91j7jbKmsrfMkQ9IjGCpdFv@dpg-d2u9fgre5dus73ei4740-a/gigga
       - key: SMTP_HOST
-        value: smtp.sendgrid.net
+        value: smtp.gmail.com
       - key: SMTP_PORT
         value: 587
       - key: SMTP_USER
-        value: apikey
+        value: hesabamn1@gmail.com
       - key: SMTP_PASS
-        value: your-sendgrid-api-key
+        value: prgzrnfkugwduuhh
       - key: SMTP_FROM
-        value: no-reply@yourdomain.com
+        value: hesabamn1@gmail.com
       - key: ALLOWED_ORIGINS
-        value: https://your-app-name.onrender.com
+        value: https://consignments.onrender.com
       - key: APP_BASE_URL
-        value: https://your-app-name.onrender.com
+        value: https://consignments.onrender.com
   - type: worker
     name: courier-tracking-worker
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: bash build.sh
     startCommand: celery -A app.celery worker --loglevel=info
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.3
       - key: CARGO_HOME
         value: /tmp/cargo
+      - key: RUSTUP_HOME
+        value: /tmp/rustup
+      - key: PATH
+        value: /tmp/cargo/bin:/opt/render/project/src/.venv/bin:/usr/local/bin:/usr/bin:/bin
       - key: REDIS_URL
         fromService:
           type: redis
           name: courier-tracking-redis
           property: connectionString
       - key: DATABASE_URL
-        fromService:
-          type: pgsql
-          name: courier-tracking-db
-          property: connectionString
+        value: postgresql://gigga_user:1x60BsERZ91j7jbKmsrfMkQ9IjGCpdFv@dpg-d2u9fgre5dus73ei4740-a/gigga
       - key: SMTP_HOST
-        value: smtp.sendgrid.net
+        value: smtp.gmail.com
       - key: SMTP_PORT
         value: 587
       - key: SMTP_USER
-        value: apikey
+        value: hesabamn1@gmail.com
       - key: SMTP_PASS
-        value: your-sendgrid-api-key
+        value: prgzrnfkugwduuhh
       - key: SMTP_FROM
-        value: no-reply@yourdomain.com
+        value: hesabamn1@gmail.com
       - key: APP_BASE_URL
-        value: https://your-app-name.onrender.com
+        value: https://consignments.onrender.com
   - type: redis
     name: courier-tracking-redis
     plan: free
