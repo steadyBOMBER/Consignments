@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Admin Dashboard</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 10px; border: 1px solid #ddd; text-align: left; }
+        th { background-color: #f4f4f4; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Admin Dashboard</h1>
+        <table>
+            <tr>
+                <th>Tracking</th>
+                <th>Title</th>
+                <th>Status</th>
+                <th>Updated At</th>
+            </tr>
+            {% for shipment in shipments %}
+            <tr>
+                <td><a href="/track/{{ shipment.tracking }}">{{ shipment.tracking }}</a></td>
+                <td>{{ shipment.title }}</td>
+                <td>{{ shipment.status }}</td>
+                <td>{{ shipment.updated_at }}</td>
+            </tr>
+            {% endfor %}
+        </table>
+        <p><a href="/">Back to Home</a></p>
+    </div>
+</body>
+</html>
