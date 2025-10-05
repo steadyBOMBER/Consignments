@@ -16,4 +16,4 @@ requests==2.31.0
 gunicorn==21.2.0
 eventlet==0.33.3
 python-dotenv==1.0.0
-cryptography==36.0.2  # Pin to avoid Rust dependency
+cryptography==36.0.2  # Explicitly pin to avoid Rust
