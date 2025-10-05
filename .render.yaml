@@ -1,0 +1,87 @@
+services:
+  - type: web
+    name: courier-tracking-web
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app -k eventlet -w 4 --threads 2
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.3
+      - key: CARGO_HOME
+        value: /tmp/cargo
+      - key: SECRET_KEY
+        value: your-secret-key
+      - key: JWT_SECRET_KEY
+        value: your-jwt-secret
+      - key: ADMIN_PASSWORD
+        value: secure-password
+      - key: SENTRY_DSN
+        value: your-sentry-dsn
+      - key: TELEGRAM_TOKEN
+        value: your-telegram-token
+      - key: TELEGRAM_ADMIN_TOKEN
+        value: your-admin-token
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: courier-tracking-redis
+          property: connectionString
+      - key: DATABASE_URL
+        fromService:
+          type: pgsql
+          name: courier-tracking-db
+          property: connectionString
+      - key: SMTP_HOST
+        value: smtp.sendgrid.net
+      - key: SMTP_PORT
+        value: 587
+      - key: SMTP_USER
+        value: apikey
+      - key: SMTP_PASS
+        value: your-sendgrid-api-key
+      - key: SMTP_FROM
+        value: no-reply@yourdomain.com
+      - key: ALLOWED_ORIGINS
+        value: https://your-app-name.onrender.com
+      - key: APP_BASE_URL
+        value: https://your-app-name.onrender.com
+  - type: worker
+    name: courier-tracking-worker
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: celery -A app.celery worker --loglevel=info
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.3
+      - key: CARGO_HOME
+        value: /tmp/cargo
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: courier-tracking-redis
+          property: connectionString
+      - key: DATABASE_URL
+        fromService:
+          type: pgsql
+          name: courier-tracking-db
+          property: connectionString
+      - key: SMTP_HOST
+        value: smtp.sendgrid.net
+      - key: SMTP_PORT
+        value: 587
+      - key: SMTP_USER
+        value: apikey
+      - key: SMTP_PASS
+        value: your-sendgrid-api-key
+      - key: SMTP_FROM
+        value: no-reply@yourdomain.com
+      - key: APP_BASE_URL
+        value: https://your-app-name.onrender.com
+  - type: redis
+    name: courier-tracking-redis
+    plan: free
+  - type: pgsql
+    name: courier-tracking-db
+    plan: free
