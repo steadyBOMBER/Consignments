@@ -14,8 +14,8 @@ from flask_socketio import SocketIO, emit, join_room
 from flask_caching import Cache
 from flask_restx import Api, Resource, fields
 from flask_wtf import FlaskForm
-from wtforms import StringField, SelectField, SubmitField
-from wtforms.validators import DataRequired, Length
+from wtforms import StringField, SelectField, SubmitField, TextAreaField
+from wtforms.validators import DataRequired, Length, Optional
 from pydantic import BaseModel, validator, ValidationError
 from typing import Optional, Dict, List, Union
 from celery import Celery, shared_task
@@ -94,6 +94,21 @@ class ShipmentForm(FlaskForm):
         ('Delivered', 'Delivered')
     ], validators=[DataRequired()])
     submit = SubmitField('Create Shipment')
+
+class CheckpointForm(FlaskForm):
+    tracking = StringField('Tracking Number', validators=[DataRequired(), Length(min=1, max=50)])
+    location = StringField('Location (address or lat,lng)', validators=[DataRequired()])
+    label = StringField('Label', validators=[DataRequired(), Length(min=1, max=100)])
+    note = TextAreaField('Note', validators=[Optional(), Length(max=500)])
+    status = SelectField('Status', choices=[
+        ('', 'No Change'),
+        ('Created', 'Created'),
+        ('In Transit', 'In Transit'),
+        ('Out for Delivery', 'Out for Delivery'),
+        ('Delivered', 'Delivered')
+    ], validators=[Optional()])
+    proof_photo = StringField('Proof Photo URL', validators=[Optional(), Length(max=500)])
+    submit = SubmitField('Add Checkpoint')
 
 # Anti-Crash: Global exception handlers
 @app.errorhandler(Exception)
@@ -435,20 +450,23 @@ checkpoint_model = api.model('Checkpoint', {
     'proof_photo': fields.String
 })
 
-# Admin dashboard route with WTForms
+# Admin dashboard route with WTForms for shipment and checkpoint
 @app.route('/admin', methods=['GET', 'POST'])
 @jwt_required()
 def admin():
     try:
-        form = ShipmentForm()
+        shipment_form = ShipmentForm(prefix='shipment')
+        checkpoint_form = CheckpointForm(prefix='checkpoint')
         shipments = Shipment.query.all()
-        if form.validate_on_submit():
+
+        # Handle Shipment Form submission
+        if shipment_form.submit.data and shipment_form.validate_on_submit():
             data = {
-                'tracking_number': form.tracking.data,
-                'title': form.title.data,
-                'origin': form.origin.data,
-                'destination': form.destination.data,
-                'status': form.status.data
+                'tracking_number': shipment_form.tracking.data,
+                'title': shipment_form.title.data,
+                'origin': shipment_form.origin.data,
+                'destination': shipment_form.destination.data,
+                'status': shipment_form.status.data
             }
             try:
                 # Use Pydantic for backend validation
@@ -488,20 +506,81 @@ def admin():
                 socketio.emit('update', shipment.to_dict(), namespace='/', room=shipment.tracking)
                 return redirect(url_for('admin'))
             except ValidationError as e:
-                return render_template('admin.html', form=form, shipments=shipments, error=str(e)), 400
+                return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, shipments=shipments, error=str(e)), 400
             except ValueError as e:
-                return render_template('admin.html', form=form, shipments=shipments, error=str(e)), 400
+                return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, shipments=shipments, error=str(e)), 400
             except IntegrityError:
                 db.session.rollback()
-                return render_template('admin.html', form=form, shipments=shipments, error='Tracking number already exists'), 409
+                return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, shipments=shipments, error='Tracking number already exists'), 409
             except SQLAlchemyError as e:
                 db.session.rollback()
                 logger.error(f"Database error: {e}")
-                return render_template('admin.html', form=form, shipments=shipments, error='Database error'), 500
+                return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, shipments=shipments, error='Database error'), 500
             except Exception as e:
                 logger.error(f"Shipment creation error: {e}")
-                return render_template('admin.html', form=form, shipments=shipments, error='Failed to create shipment'), 500
-        return render_template('admin.html', form=form, shipments=shipments)
+                return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, shipments=shipments, error='Failed to create shipment'), 500
+
+        # Handle Checkpoint Form submission
+        if checkpoint_form.submit.data and checkpoint_form.validate_on_submit():
+            tracking = checkpoint_form.tracking.data
+            shipment = Shipment.query.filter_by(tracking=tracking).first()
+            if not shipment:
+                return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, shipments=shipments, error='Shipment not found'), 404
+            data = {
+                'address': checkpoint_form.location.data if ',' not in checkpoint_form.location.data else None,
+                'lat': float(checkpoint_form.location.data.split(',')[0]) if ',' in checkpoint_form.location.data and all(x.replace('.', '').isdigit() for x in checkpoint_form.location.data.split(',')) else None,
+                'lng': float(checkpoint_form.location.data.split(',')[1]) if ',' in checkpoint_form.location.data and all(x.replace('.', '').isdigit() for x in checkpoint_form.location.data.split(',')) else None,
+                'label': checkpoint_form.label.data,
+                'note': checkpoint_form.note.data or None,
+                'status': checkpoint_form.status.data or None,
+                'proof_photo': checkpoint_form.proof_photo.data or None
+            }
+            try:
+                CheckpointCreate(**data)
+                if data['address']:
+                    coords = geocode_address(data['address'])
+                    lat, lng = coords['lat'], coords['lng']
+                else:
+                    lat, lng = data['lat'], data['lng']
+                position = db.session.query(db.func.max(Checkpoint.position)).filter_by(shipment_id=shipment.id).scalar() or 0
+                checkpoint = Checkpoint(
+                    shipment_id=shipment.id,
+                    position=position + 1,
+                    lat=lat,
+                    lng=lng,
+                    label=data['label'],
+                    note=data['note'],
+                    status=data['status'],
+                    proof_photo=data['proof_photo']
+                )
+                db.session.add(checkpoint)
+                if data['status']:
+                    shipment.status = data['status']
+                    status_history = StatusHistory(shipment=shipment, status=data['status'])
+                    db.session.add(status_history)
+                    if shipment.status == 'Delivered':
+                        shipment.eta = checkpoint.timestamp
+                db.session.commit()
+                socketio.emit('update', shipment.to_dict(), namespace='/', room=tracking)
+                for subscriber in shipment.subscribers:
+                    if subscriber.is_active:
+                        send_checkpoint_email_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.email)
+                        if subscriber.phone:
+                            send_checkpoint_sms_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.phone)
+                return redirect(url_for('admin'))
+            except ValidationError as e:
+                return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, shipments=shipments, error=str(e)), 400
+            except ValueError as e:
+                return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, shipments=shipments, error=str(e)), 400
+            except SQLAlchemyError as e:
+                db.session.rollback()
+                logger.error(f"Database error: {e}")
+                return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, shipments=shipments, error='Database error'), 500
+            except Exception as e:
+                logger.error(f"Checkpoint creation error for {tracking}: {e}")
+                return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, shipments=shipments, error='Failed to add checkpoint'), 500
+
+        return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, shipments=shipments)
     except Exception as e:
         logger.error(f"Admin dashboard error: {e}")
         return render_template('error.html', error='Failed to load admin dashboard'), 500
@@ -565,7 +644,7 @@ def track_redirect():
     try:
         tracking = request.args.get('tracking')
         if tracking:
-            return redirect(url_for('track', tracking=tracking))
+            return redirect Jonja2Template(url_for('track', tracking=tracking))
         return render_template('error.html', error='Tracking number required'), 400
     except Exception as e:
         logger.error(f"Track redirect error: {e}")
@@ -675,32 +754,37 @@ class ShipmentList(Resource):
             return shipment.to_dict(), 201
         except ValidationError as e:
             if request.form:
-                form = ShipmentForm(formdata=request.form)
-                return render_template('admin.html', form=form, shipments=Shipment.query.all(), error=str(e)), 400
+                shipment_form = ShipmentForm(prefix='shipment', formdata=request.form)
+                checkpoint_form = CheckpointForm(prefix='checkpoint')
+                return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, shipments=Shipment.query.all(), error=str(e)), 400
             return {'error': str(e)}, 400
         except ValueError as e:
             if request.form:
-                form = ShipmentForm(formdata=request.form)
-                return render_template('admin.html', form=form, shipments=Shipment.query.all(), error=str(e)), 400
+                shipment_form = ShipmentForm(prefix='shipment', formdata=request.form)
+                checkpoint_form = CheckpointForm(prefix='checkpoint')
+                return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, shipments=Shipment.query.all(), error=str(e)), 400
             return {'error': str(e)}, 400
         except IntegrityError:
             db.session.rollback()
             if request.form:
-                form = ShipmentForm(formdata=request.form)
-                return render_template('admin.html', form=form, shipments=Shipment.query.all(), error='Tracking number already exists'), 409
+                shipment_form = ShipmentForm(prefix='shipment', formdata=request.form)
+                checkpoint_form = CheckpointForm(prefix='checkpoint')
+                return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, shipments=Shipment.query.all(), error='Tracking number already exists'), 409
             return {'error': 'Tracking number already exists'}, 409
         except SQLAlchemyError as e:
             db.session.rollback()
             logger.error(f"Database error: {e}")
             if request.form:
-                form = ShipmentForm(formdata=request.form)
-                return render_template('admin.html', form=form, shipments=Shipment.query.all(), error='Database error'), 500
+                shipment_form = ShipmentForm(prefix='shipment', formdata=request.form)
+                checkpoint_form = CheckpointForm(prefix='checkpoint')
+                return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, shipments=Shipment.query.all(), error='Database error'), 500
             return {'error': 'Database error'}, 500
         except Exception as e:
             logger.error(f"Shipment creation error: {e}")
             if request.form:
-                form = ShipmentForm(formdata=request.form)
-                return render_template('admin.html', form=form, shipments=Shipment.query.all(), error='Failed to create shipment'), 500
+                shipment_form = ShipmentForm(prefix='shipment', formdata=request.form)
+                checkpoint_form = CheckpointForm(prefix='checkpoint')
+                return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, shipments=Shipment.query.all(), error='Failed to create shipment'), 500
             return {'error': 'Failed to create shipment'}, 500
 
 @ns.route('/<tracking>/checkpoints')
@@ -711,8 +795,12 @@ class CheckpointList(Resource):
         try:
             shipment = Shipment.query.filter_by(tracking=tracking).first()
             if not shipment:
+                if request.form:
+                    shipment_form = ShipmentForm(prefix='shipment')
+                    checkpoint_form = CheckpointForm(prefix='checkpoint', formdata=request.form)
+                    return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, shipments=Shipment.query.all(), error='Shipment not found'), 404
                 return {'error': 'Shipment not found'}, 404
-            data = CheckpointCreate(**request.get_json()).dict()
+            data = CheckpointCreate(**request.get_json() or request.form).dict()
             if data['address']:
                 coords = geocode_address(data['address'])
                 lat, lng = coords['lat'], coords['lng']
@@ -743,17 +831,35 @@ class CheckpointList(Resource):
                     send_checkpoint_email_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.email)
                     if subscriber.phone:
                         send_checkpoint_sms_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.phone)
+            if request.form:
+                return redirect(url_for('admin'))
             return checkpoint.to_dict(), 201
         except ValidationError as e:
+            if request.form:
+                shipment_form = ShipmentForm(prefix='shipment')
+                checkpoint_form = CheckpointForm(prefix='checkpoint', formdata=request.form)
+                return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, shipments=Shipment.query.all(), error=str(e)), 400
             return {'error': str(e)}, 400
         except ValueError as e:
+            if request.form:
+                shipment_form = ShipmentForm(prefix='shipment')
+                checkpoint_form = CheckpointForm(prefix='checkpoint', formdata=request.form)
+                return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, shipments=Shipment.query.all(), error=str(e)), 400
             return {'error': str(e)}, 400
         except SQLAlchemyError as e:
             db.session.rollback()
             logger.error(f"Database error: {e}")
+            if request.form:
+                shipment_form = ShipmentForm(prefix='shipment')
+                checkpoint_form = CheckpointForm(prefix='checkpoint', formdata=request.form)
+                return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, shipments=Shipment.query.all(), error='Database error'), 500
             return {'error': 'Database error'}, 500
         except Exception as e:
             logger.error(f"Checkpoint creation error for {tracking}: {e}")
+            if request.form:
+                shipment_form = ShipmentForm(prefix='shipment')
+                checkpoint_form = CheckpointForm(prefix='checkpoint', formdata=request.form)
+                return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, shipments=Shipment.query.all(), error='Failed to add checkpoint'), 500
             return {'error': 'Failed to add checkpoint'}, 500
 
 @ns.route('/<tracking>/subscribe')
