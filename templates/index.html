@@ -1,27 +1,40 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Courier Tracking</title>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Courier Tracking - Home</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
     <style>
-        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }
-        .container { max-width: 600px; margin: 0 auto; text-align: center; }
-        input, button { padding: 10px; margin: 5px; }
-        .error { color: red; }
+        body { font-family: Arial, sans-serif; }
+        .container { max-width: 800px; margin: 0 auto; padding: 20px; }
+        .shipment { margin: 10px 0; padding: 10px; border-bottom: 1px solid #ddd; }
+        .status { font-weight: bold; }
     </style>
 </head>
-<body>
+<body class="bg-gray-100">
     <div class="container">
-        <h1>Courier Tracking</h1>
-        <form action="/track" method="GET">
-            <input type="text" name="tracking" placeholder="Enter tracking number" required>
-            <button type="submit">Track</button>
+        <h1 class="text-2xl font-bold text-gray-800 mb-6">Courier Tracking Service</h1>
+        <h2 class="text-xl font-semibold text-gray-700 mb-4">Track Your Shipments</h2>
+        <form action="/track" method="GET" class="mb-6">
+            <input type="text" name="tracking" placeholder="Enter tracking number" class="border rounded py-2 px-4 w-full max-w-md">
+            <button type="submit" class="bg-blue-600 text-white py-2 px-4 rounded hover:bg-blue-700">Track</button>
         </form>
-        {% if error %}
-        <p class="error">{{ error }}</p>
+        <h3 class="text-lg font-semibold text-gray-700 mb-4">All Shipments</h3>
+        {% if shipments %}
+        <div>
+            {% for shipment in shipments %}
+            <div class="shipment">
+                <p><span class="status">{{ shipment.status }}</span> - {{ shipment.title }} ({{ shipment.tracking }})</p>
+                <p>ETA: {{ shipment.eta|default('N/A') }}</p>
+                <a href="{{ url_for('track', tracking=shipment.tracking) }}" class="text-blue-600 hover:underline">View Details</a>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <p class="text-gray-600">No shipments found.</p>
         {% endif %}
-        <p><a href="/admin">Admin Login</a></p>
+        <p class="mt-6"><a href="/login" class="text-blue-600 hover:underline">Admin Login</a></p>
     </div>
 </body>
 </html>
