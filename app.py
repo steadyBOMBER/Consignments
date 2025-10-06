@@ -1,3 +1,4 @@
+```python
 import os
 import logging
 import smtplib
@@ -31,8 +32,7 @@ env.read_env()
 
 required_vars = [
     'DATABASE_URL', 'REDIS_URL', 'TELEGRAM_TOKEN', 'ADMIN_PASSWORD_HASH',
-    'GOOGLE_MAPS_API_KEY', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS',
-    'SMTP_FROM', 'APP_BASE_URL'
+    'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM', 'APP_BASE_URL'
 ]
 for var in required_vars:
     if not env(var):
@@ -47,8 +47,8 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
-        logging.FileHandler('app.log'),  # Log to file for debugging
-        logging.StreamHandler()  # Also log to console
+        logging.FileHandler('app.log'),
+        logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
@@ -60,7 +60,6 @@ app.config['SQLALCHEMY_DATABASE_URI'] = env('DATABASE_URL')
 app.config['RATELIMIT_STORAGE_URL'] = env('REDIS_URL')
 app.config['ADMIN_PASSWORD_HASH'] = env('ADMIN_PASSWORD_HASH')
 app.config['TELEGRAM_TOKEN'] = env('TELEGRAM_TOKEN')
-app.config['GOOGLE_MAPS_API_KEY'] = env('GOOGLE_MAPS_API_KEY')
 app.config['SMTP_HOST'] = env('SMTP_HOST')  # e.g., smtp.gmail.com
 app.config['SMTP_PORT'] = env.int('SMTP_PORT')  # e.g., 587
 app.config['SMTP_USER'] = env('SMTP_USER')  # Gmail address
@@ -108,23 +107,24 @@ def haversine(lat1, lon1, lat2, lon2):
 def calculate_eta(distance_km):
     return timedelta(hours=distance_km / 50)  # Assume 50 km/h average speed
 
-# Geocoding function
+# Geocoding function using Nominatim (OpenStreetMap)
 @cache.memoize(timeout=86400)  # Cache for 24 hours
 def geocode_address(address: str) -> Dict[str, float]:
     try:
         response = requests.get(
-            "https://maps.googleapis.com/maps/api/geocode/json",
-            params={"address": address, "key": app.config['GOOGLE_MAPS_API_KEY']},
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": address, "format": "json", "limit": 1},
+            headers={"User-Agent": "CourierTrackingApp/1.0 (contact@yourdomain.com)"},  # Required by Nominatim
             timeout=5
         )
         response.raise_for_status()
         data = response.json()
-        if data['status'] != 'OK' or not data['results']:
+        if not data:
             raise ValueError(f"Geocoding failed for address: {address}")
-        location = data['results'][0]['geometry']['location']
-        return {"lat": location['lat'], "lng": location['lng']}
+        location = data[0]
+        return {"lat": float(location['lat']), "lng": float(location['lon'])}
     except requests.RequestException as e:
-        logger.error(f"Geocoding API error: {e}")
+        logger.error(f"Nominatim geocoding error: {e}")
         raise ValueError(f"Failed to geocode address: {address}")
 
 # Async email task
@@ -316,6 +316,18 @@ class ShipmentCreate(BaseModel):
         return v
 
 # SQLAlchemy models
+class StatusHistory(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    shipment_id = db.Column(db.Integer, db.ForeignKey('shipment.id'), nullable=False)
+    status = db.Column(db.String(50), nullable=False)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def to_dict(self):
+        return {
+            'status': self.status,
+            'timestamp': self.timestamp.isoformat() + 'Z'
+        }
+
 class Shipment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     tracking = db.Column(db.String(50), unique=True, nullable=False)
@@ -332,6 +344,7 @@ class Shipment(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     checkpoints = db.relationship('Checkpoint', backref='shipment', lazy=True)
     subscribers = db.relationship('Subscriber', backref='shipment', lazy=True)
+    history = db.relationship('StatusHistory', backref='shipment', lazy=True)
 
     def calculate_distance_and_eta(self):
         self.distance_km = haversine(self.origin_lat, self.origin_lng, self.dest_lat, self.dest_lng)
@@ -347,7 +360,8 @@ class Shipment(db.Model):
             'distance_km': self.distance_km,
             'eta': self.eta.isoformat() + 'Z' if self.eta else None,
             'status': self.status,
-            'created_at': self.created_at.isoformat() + 'Z'
+            'created_at': self.created_at.isoformat() + 'Z',
+            'checkpoints': [cp.to_dict() for cp in self.checkpoints]
         }
 
 class Checkpoint(db.Model):
@@ -479,21 +493,23 @@ def track(tracking):
             return jsonify({'error': 'Shipment not found'}), 404
         pagination = Checkpoint.query.filter_by(shipment_id=shipment.id).order_by(Checkpoint.position).paginate(page=page, per_page=per_page, error_out=False)
         checkpoints = [cp.to_dict() for cp in pagination.items]
-        coords = [(shipment.origin_lat, shipment.origin_lng)]
-        for cp in shipment.checkpoints:
-            coords.append((cp.lat, cp.lng))
-        coords.append((shipment.dest_lat, shipment.dest_lng))
-        return render_template('track.html', 
-                              shipment=shipment.to_dict(), 
-                              checkpoints=checkpoints, 
-                              pagination=pagination,
-                              coords=coords,
-                              gmaps_api_key=app.config['GOOGLE_MAPS_API_KEY'])
+        history = [h.to_dict() for h in shipment.history]
+        return render_template(
+            'track.html',
+            shipment=shipment,
+            checkpoints=checkpoints,
+            history=history,
+            pagination=pagination,
+            origin_lat=shipment.origin_lat,
+            origin_lng=shipment.origin_lng,
+            dest_lat=shipment.dest_lat,
+            dest_lng=shipment.dest_lng
+        )
     except Exception as e:
         logger.error(f"Track error for {tracking}: {e}")
         return jsonify({'error': 'Failed to retrieve tracking data'}), 500
 
-@socketio.on('connect', namespace='/track')
+@socketio.on('connect', namespace='/')
 def handle_connect():
     try:
         tracking = request.args.get('tracking')
@@ -503,6 +519,17 @@ def handle_connect():
             emit('status', {'message': 'Connected'})
     except Exception as e:
         logger.error(f"WebSocket connect error: {e}")
+
+@socketio.on('subscribe')
+def handle_subscribe(tracking):
+    try:
+        join_room(tracking)
+        shipment = Shipment.query.filter_by(tracking=tracking).first()
+        if shipment:
+            emit('update', shipment.to_dict(), room=tracking)
+    except Exception as e:
+        logger.error(f"WebSocket subscribe error for {tracking}: {e}")
+        emit('error', {'message': 'Failed to subscribe'})
 
 @ns.route('/')
 class ShipmentList(Resource):
@@ -550,7 +577,11 @@ class ShipmentList(Resource):
             )
             shipment.calculate_distance_and_eta()
             db.session.add(shipment)
+            # Add initial status to history
+            status_history = StatusHistory(shipment=shipment, status=data['status'])
+            db.session.add(status_history)
             db.session.commit()
+            socketio.emit('update', shipment.to_dict(), namespace='/', room=shipment.tracking)
             return shipment.to_dict(), 201
         except ValidationError as e:
             return {'error': str(e)}, 400
@@ -596,10 +627,12 @@ class CheckpointList(Resource):
             db.session.add(checkpoint)
             if data['status']:
                 shipment.status = data['status']
+                status_history = StatusHistory(shipment=shipment, status=data['status'])
+                db.session.add(status_history)
                 if shipment.status == 'Delivered':
                     shipment.eta = checkpoint.timestamp
             db.session.commit()
-            socketio.emit('checkpoint', checkpoint.to_dict(), namespace='/track', room=tracking)
+            socketio.emit('update', shipment.to_dict(), namespace='/', room=tracking)
             for subscriber in shipment.subscribers:
                 if subscriber.is_active:
                     send_checkpoint_email_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.email)
@@ -745,7 +778,10 @@ def telegram_webhook(token):
             )
             shipment.calculate_distance_and_eta()
             db.session.add(shipment)
+            status_history = StatusHistory(shipment=shipment, status='Created')
+            db.session.add(status_history)
             db.session.commit()
+            socketio.emit('update', shipment.to_dict(), namespace='/', room=tracking)
             send_message(f"Shipment {tracking} created. Distance: {shipment.distance_km:.2f}km, ETA: {shipment.eta}", reply_markup=get_navigation_keyboard(tracking))
             return jsonify({'message': 'OK'})
 
@@ -787,8 +823,12 @@ def telegram_webhook(token):
             position = db.session.query(db.func.max(Checkpoint.position)).filter_by(shipment_id=shipment.id).scalar() or 0
             checkpoint = Checkpoint(shipment_id=shipment.id, position=position + 1, **checkpoint_data)
             db.session.add(checkpoint)
+            if checkpoint_data['status']:
+                shipment.status = checkpoint_data['status']
+                status_history = StatusHistory(shipment=shipment, status=checkpoint_data['status'])
+                db.session.add(status_history)
             db.session.commit()
-            socketio.emit('checkpoint', checkpoint.to_dict(), namespace='/track', room=tracking)
+            socketio.emit('update', shipment.to_dict(), namespace='/', room=tracking)
             for subscriber in shipment.subscribers:
                 if subscriber.is_active:
                     send_checkpoint_email_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.email)
@@ -821,13 +861,15 @@ def telegram_webhook(token):
                     timestamp=datetime.utcnow() + timedelta(hours=i * step_hours)
                 )
                 db.session.add(checkpoint)
-                socketio.emit('checkpoint', checkpoint.to_dict(), namespace='/track', room=tracking)
+                socketio.emit('update', shipment.to_dict(), namespace='/', room=tracking)
                 for subscriber in shipment.subscribers:
                     if subscriber.is_active:
                         send_checkpoint_email_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.email)
                         if subscriber.phone:
                             send_checkpoint_sms_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.phone)
             shipment.status = 'In Transit'
+            status_history = StatusHistory(shipment=shipment, status='In Transit')
+            db.session.add(status_history)
             db.session.commit()
             send_message(f"Simulated {num_points} checkpoints for {tracking}", reply_markup=get_navigation_keyboard(tracking))
             return jsonify({'message': 'OK'})
@@ -870,3 +912,4 @@ if __name__ == '__main__':
     with app.app_context():
         db.create_all()
     socketio.run(app, debug=False, host='0.0.0.0', port=5000)
+```
