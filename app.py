@@ -1,5 +1,3 @@
-<xaiArtifact artifact_id="01d60c53-c20f-48e5-9b96-e67ca1578005" artifact_version_id="0d811b85-d13e-47ad-834c-738b43737da6" title="app.py" contentType="text/python">
-```python
 import os
 import logging
 import smtplib
@@ -15,6 +13,9 @@ from flask_migrate import Migrate
 from flask_socketio import SocketIO, emit, join_room
 from flask_caching import Cache
 from flask_restx import Api, Resource, fields
+from flask_wtf import FlaskForm
+from wtforms import StringField, SelectField, SubmitField
+from wtforms.validators import DataRequired, Length
 from pydantic import BaseModel, validator, ValidationError
 from typing import Optional, Dict, List, Union
 from celery import Celery, shared_task
@@ -67,6 +68,7 @@ app.config['SMTP_USER'] = env('SMTP_USER')  # Gmail address
 app.config['SMTP_PASS'] = env('SMTP_PASS')  # Gmail app password
 app.config['SMTP_FROM'] = env('SMTP_FROM')  # Sender email
 app.config['APP_BASE_URL'] = env('APP_BASE_URL')  # e.g., https://yourdomain.com
+app.config['SECRET_KEY'] = env.str('SECRET_KEY', default=os.urandom(24))  # For WTForms
 
 socketio = SocketIO(app, async_mode='threading')
 jwt = JWTManager(app)
@@ -78,6 +80,20 @@ cache = Cache(app, config={'CACHE_TYPE': 'redis', 'CACHE_REDIS_URL': env('REDIS_
 api = Api(app, version='1.0', title='Courier Tracking API', description='Advanced API for tracking shipments')
 celery = Celery(app.name, broker=env('REDIS_URL'), backend=env('REDIS_URL'))
 celery.conf.update(app.config)
+
+# WTForms for admin
+class ShipmentForm(FlaskForm):
+    tracking = StringField('Tracking Number', validators=[DataRequired(), Length(min=1, max=50)])
+    title = StringField('Title', validators=[DataRequired(), Length(min=1, max=100)], default='Consignment')
+    origin = StringField('Origin (address or lat,lng)', validators=[DataRequired()])
+    destination = StringField('Destination (address or lat,lng)', validators=[DataRequired()])
+    status = SelectField('Status', choices=[
+        ('Created', 'Created'),
+        ('In Transit', 'In Transit'),
+        ('Out for Delivery', 'Out for Delivery'),
+        ('Delivered', 'Delivered')
+    ], validators=[DataRequired()])
+    submit = SubmitField('Create Shipment')
 
 # Anti-Crash: Global exception handlers
 @app.errorhandler(Exception)
@@ -398,7 +414,7 @@ class Subscriber(db.Model):
     phone = db.Column(db.String(20), nullable=True)
     is_active = db.Column(db.Boolean, default=True)
 
-# Flask-RESTX namespace
+# Flask-RESTx namespace
 ns = api.namespace('shipments', description='Advanced Shipment operations')
 
 shipment_model = api.model('Shipment', {
@@ -419,23 +435,73 @@ checkpoint_model = api.model('Checkpoint', {
     'proof_photo': fields.String
 })
 
-# Homepage route
-@app.route('/')
-def index():
-    try:
-        shipments = Shipment.query.all()
-        return render_template('index.html', shipments=shipments)
-    except Exception as e:
-        logger.error(f"Index error: {e}")
-        return render_template('error.html', error='Failed to load homepage'), 500
-
-# Admin dashboard route
-@app.route('/admin')
+# Admin dashboard route with WTForms
+@app.route('/admin', methods=['GET', 'POST'])
 @jwt_required()
 def admin():
     try:
+        form = ShipmentForm()
         shipments = Shipment.query.all()
-        return render_template('admin.html', shipments=shipments)
+        if form.validate_on_submit():
+            data = {
+                'tracking_number': form.tracking.data,
+                'title': form.title.data,
+                'origin': form.origin.data,
+                'destination': form.destination.data,
+                'status': form.status.data
+            }
+            try:
+                # Use Pydantic for backend validation
+                ShipmentCreate(**data)
+                origin = data['origin']
+                destination = data['destination']
+                if ',' in origin and all(x.replace('.', '').isdigit() for x in origin.split(',')):
+                    origin_lat, origin_lng = map(float, origin.split(','))
+                    origin_address = None
+                else:
+                    coords = geocode_address(origin)
+                    origin_lat, origin_lng = coords['lat'], coords['lng']
+                    origin_address = origin
+                if ',' in destination and all(x.replace('.', '').isdigit() for x in destination.split(',')):
+                    dest_lat, dest_lng = map(float, destination.split(','))
+                    dest_address = None
+                else:
+                    coords = geocode_address(destination)
+                    dest_lat, dest_lng = coords['lat'], coords['lng']
+                    dest_address = destination
+                shipment = Shipment(
+                    tracking=data['tracking_number'],
+                    title=data['title'],
+                    origin_lat=origin_lat,
+                    origin_lng=origin_lng,
+                    dest_lat=dest_lat,
+                    dest_lng=dest_lng,
+                    origin_address=origin_address,
+                    dest_address=dest_address,
+                    status=data['status']
+                )
+                shipment.calculate_distance_and_eta()
+                db.session.add(shipment)
+                status_history = StatusHistory(shipment=shipment, status=data['status'])
+                db.session.add(status_history)
+                db.session.commit()
+                socketio.emit('update', shipment.to_dict(), namespace='/', room=shipment.tracking)
+                return redirect(url_for('admin'))
+            except ValidationError as e:
+                return render_template('admin.html', form=form, shipments=shipments, error=str(e)), 400
+            except ValueError as e:
+                return render_template('admin.html', form=form, shipments=shipments, error=str(e)), 400
+            except IntegrityError:
+                db.session.rollback()
+                return render_template('admin.html', form=form, shipments=shipments, error='Tracking number already exists'), 409
+            except SQLAlchemyError as e:
+                db.session.rollback()
+                logger.error(f"Database error: {e}")
+                return render_template('admin.html', form=form, shipments=shipments, error='Database error'), 500
+            except Exception as e:
+                logger.error(f"Shipment creation error: {e}")
+                return render_template('admin.html', form=form, shipments=shipments, error='Failed to create shipment'), 500
+        return render_template('admin.html', form=form, shipments=shipments)
     except Exception as e:
         logger.error(f"Admin dashboard error: {e}")
         return render_template('error.html', error='Failed to load admin dashboard'), 500
@@ -609,27 +675,32 @@ class ShipmentList(Resource):
             return shipment.to_dict(), 201
         except ValidationError as e:
             if request.form:
-                return render_template('admin.html', shipments=Shipment.query.all(), error=str(e)), 400
+                form = ShipmentForm(formdata=request.form)
+                return render_template('admin.html', form=form, shipments=Shipment.query.all(), error=str(e)), 400
             return {'error': str(e)}, 400
         except ValueError as e:
             if request.form:
-                return render_template('admin.html', shipments=Shipment.query.all(), error=str(e)), 400
+                form = ShipmentForm(formdata=request.form)
+                return render_template('admin.html', form=form, shipments=Shipment.query.all(), error=str(e)), 400
             return {'error': str(e)}, 400
         except IntegrityError:
             db.session.rollback()
             if request.form:
-                return render_template('admin.html', shipments=Shipment.query.all(), error='Tracking number already exists'), 409
+                form = ShipmentForm(formdata=request.form)
+                return render_template('admin.html', form=form, shipments=Shipment.query.all(), error='Tracking number already exists'), 409
             return {'error': 'Tracking number already exists'}, 409
         except SQLAlchemyError as e:
             db.session.rollback()
             logger.error(f"Database error: {e}")
             if request.form:
-                return render_template('admin.html', shipments=Shipment.query.all(), error='Database error'), 500
+                form = ShipmentForm(formdata=request.form)
+                return render_template('admin.html', form=form, shipments=Shipment.query.all(), error='Database error'), 500
             return {'error': 'Database error'}, 500
         except Exception as e:
             logger.error(f"Shipment creation error: {e}")
             if request.form:
-                return render_template('admin.html', shipments=Shipment.query.all(), error='Failed to create shipment'), 500
+                form = ShipmentForm(formdata=request.form)
+                return render_template('admin.html', form=form, shipments=Shipment.query.all(), error='Failed to create shipment'), 500
             return {'error': 'Failed to create shipment'}, 500
 
 @ns.route('/<tracking>/checkpoints')
@@ -965,4 +1036,3 @@ if __name__ == '__main__':
     with app.app_context():
         db.create_all()
     socketio.run(app, debug=False, host='0.0.0.0', port=5000)
-```
