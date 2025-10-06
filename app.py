@@ -1,6 +1,7 @@
 import os
 import logging
 import smtplib
+import random
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
@@ -136,11 +137,28 @@ def haversine(lat1, lon1, lat2, lon2):
     distance = R * c
     return distance
 
-def calculate_eta(distance_km):
-    return timedelta(hours=distance_km / 50)  # Assume 50 km/h average speed
+def calculate_eta(distance_km, speed_kmh=50):
+    return timedelta(hours=distance_km / speed_kmh)
+
+# Reverse geocoding for stop naming
+@cache.memoize(timeout=86400)
+def reverse_geocode(lat: float, lng: float) -> str:
+    try:
+        response = requests.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={"lat": lat, "lon": lng, "format": "json"},
+            headers={"User-Agent": "CourierTrackingApp/1.0 (contact@yourdomain.com)"},
+            timeout=5
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data.get('display_name', f"Location at {lat:.4f}, {lng:.4f}")
+    except requests.RequestException as e:
+        logger.error(f"Reverse geocoding error: {e}")
+        return f"Location at {lat:.4f}, {lng:.4f}"
 
 # Geocoding function using Nominatim (OpenStreetMap)
-@cache.memoize(timeout=86400)  # Cache for 24 hours
+@cache.memoize(timeout=86400)
 def geocode_address(address: str) -> Dict[str, float]:
     try:
         response = requests.get(
@@ -158,6 +176,39 @@ def geocode_address(address: str) -> Dict[str, float]:
     except requests.RequestException as e:
         logger.error(f"Nominatim geocoding error: {e}")
         raise ValueError(f"Failed to geocode address: {address}")
+
+# Helper function to generate realistic waypoints
+def generate_waypoints(origin_lat, origin_lng, dest_lat, dest_lng, num_points):
+    waypoints = []
+    total_distance = haversine(origin_lat, origin_lng, dest_lat, dest_lng)
+    
+    # Determine number of stops (1–3 based on distance)
+    num_stops = min(max(1, int(total_distance // 200)), 3)  # 1 stop per 200km, max 3
+    if num_points < num_stops + 2:  # Ensure enough points for stops + origin/destination
+        num_points = num_stops + 2
+
+    # Generate intermediate waypoints
+    for i in range(num_points):
+        fraction = i / (num_points - 1)
+        # Add slight randomness to simulate non-linear paths
+        lat = origin_lat + (dest_lat - origin_lat) * fraction + random.uniform(-0.05, 0.05)
+        lng = origin_lng + (dest_lng - origin_lng) * fraction + random.uniform(-0.05, 0.05)
+        # Ensure coordinates stay within valid bounds
+        lat = max(min(lat, 90), -90)
+        lng = max(min(lng, 180), -180)
+        waypoints.append((lat, lng))
+    
+    return waypoints
+
+# Helper function to calculate variable speed
+def calculate_speed(distance_km, is_urban=False):
+    if distance_km > 100:  # Long distance (highway)
+        base_speed = random.uniform(60, 100)  # 60–100 km/h
+    else:  # Short distance (urban or local)
+        base_speed = random.uniform(30, 60)  # 30–60 km/h
+    if is_urban:
+        base_speed *= random.uniform(0.7, 0.9)  # Reduce speed in urban areas
+    return base_speed
 
 # Async email task
 @shared_task(bind=True, max_retries=3, retry_backoff=2, retry_jitter=True)
@@ -644,7 +695,7 @@ def track_redirect():
     try:
         tracking = request.args.get('tracking')
         if tracking:
-            return redirect Jonja2Template(url_for('track', tracking=tracking))
+            return redirect(url_for('track', tracking=tracking))
         return render_template('error.html', error='Tracking number required'), 400
     except Exception as e:
         logger.error(f"Track redirect error: {e}")
@@ -907,7 +958,7 @@ class TrackMultiple(Resource):
             logger.error(f"Track multiple error: {e}")
             return {'error': 'Failed to track shipments'}, 500
 
-# Telegram webhook
+# Telegram webhook with enhanced simulation
 @app.route('/telegram/webhook/<token>', methods=['POST'])
 def telegram_webhook(token):
     if token != app.config['TELEGRAM_TOKEN']:
@@ -1052,37 +1103,79 @@ def telegram_webhook(token):
             tracking, num_points, step_hours = args
             try:
                 num_points, step_hours = int(num_points), int(step_hours)
-            except ValueError:
-                send_message("Invalid numbers for simulation", reply_markup=get_navigation_keyboard())
+                if num_points < 2 or step_hours < 1:
+                    raise ValueError("Number of points must be at least 2, step hours must be at least 1")
+            except ValueError as e:
+                send_message(f"Invalid numbers for simulation: {str(e)}", reply_markup=get_navigation_keyboard())
                 return jsonify({'error': 'Invalid numbers'}), 400
             shipment = Shipment.query.filter_by(tracking=tracking).first()
             if not shipment:
                 send_message("Shipment not found", reply_markup=get_navigation_keyboard())
                 return jsonify({'error': 'Shipment not found'}), 404
             position = db.session.query(db.func.max(Checkpoint.position)).filter_by(shipment_id=shipment.id).scalar() or 0
-            for i in range(1, num_points + 1):
-                lat = shipment.origin_lat + (shipment.dest_lat - shipment.origin_lat) * i / num_points
-                lng = shipment.origin_lng + (shipment.dest_lng - shipment.origin_lng) * i / num_points
+            
+            # Generate realistic waypoints
+            waypoints = generate_waypoints(shipment.origin_lat, shipment.origin_lng, shipment.dest_lat, shipment.dest_lng, num_points)
+            total_distance = haversine(shipment.origin_lat, shipment.origin_lng, shipment.dest_lat, shipment.dest_lng)
+            
+            # Define realistic statuses for checkpoints
+            status_sequence = ['Created', 'At Warehouse', 'In Transit', 'At Sorting Facility', 'Out for Delivery', 'Delivered']
+            max_status_index = min(len(status_sequence) - 1, num_points - 1)
+            
+            current_time = datetime.utcnow()
+            for i, (lat, lng) in enumerate(waypoints, 1):
+                # Calculate distance to previous point
+                prev_lat = shipment.origin_lat if i == 1 else waypoints[i-2][0]
+                prev_lng = shipment.origin_lng if i == 1 else waypoints[i-2][1]
+                segment_distance = haversine(prev_lat, prev_lng, lat, lng)
+                
+                # Determine if urban (closer to origin/destination)
+                is_urban = i == 1 or i == num_points or segment_distance < 50
+                speed = calculate_speed(segment_distance, is_urban)
+                
+                # Calculate time for this segment with random delay
+                travel_time = calculate_eta(segment_distance, speed)
+                delay = timedelta(minutes=random.uniform(0, 120))  # 0–2 hour random delay
+                current_time += travel_time + delay
+                
+                # Assign status
+                status_index = min(i * max_status_index // num_points, max_status_index)
+                status = status_sequence[status_index] if i < num_points else 'Delivered'
+                
+                # Generate realistic label and note
+                location_name = reverse_geocode(lat, lng)
+                label = f"{status} at {location_name.split(',')[0]}"  # Use city or first part of address
+                note = f"Processed at {location_name}" if status in ['At Warehouse', 'At Sorting Facility'] else f"En route to {shipment.dest_address or 'destination'}"
+                
                 checkpoint = Checkpoint(
                     shipment_id=shipment.id,
                     position=position + i,
                     lat=lat,
                     lng=lng,
-                    label=f"Simulated Checkpoint {i}",
-                    timestamp=datetime.utcnow() + timedelta(hours=i * step_hours)
+                    label=label,
+                    note=note,
+                    status=status,
+                    timestamp=current_time
                 )
                 db.session.add(checkpoint)
+                
+                # Update shipment status if applicable
+                if status and status != shipment.status:
+                    shipment.status = status
+                    status_history = StatusHistory(shipment=shipment, status=status)
+                    db.session.add(status_history)
+                    if status == 'Delivered':
+                        shipment.eta = current_time
+                
                 socketio.emit('update', shipment.to_dict(), namespace='/', room=tracking)
                 for subscriber in shipment.subscribers:
                     if subscriber.is_active:
                         send_checkpoint_email_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.email)
                         if subscriber.phone:
                             send_checkpoint_sms_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.phone)
-            shipment.status = 'In Transit'
-            status_history = StatusHistory(shipment=shipment, status='In Transit')
-            db.session.add(status_history)
+            
             db.session.commit()
-            send_message(f"Simulated {num_points} checkpoints for {tracking}", reply_markup=get_navigation_keyboard(tracking))
+            send_message(f"Simulated {num_points} checkpoints for {tracking}. Final status: {shipment.status}", reply_markup=get_navigation_keyboard(tracking))
             return jsonify({'message': 'OK'})
 
         elif command == '/track_multiple' and args:
