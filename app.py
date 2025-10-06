@@ -1,10 +1,12 @@
+<xaiArtifact artifact_id="01d60c53-c20f-48e5-9b96-e67ca1578005" artifact_version_id="0d811b85-d13e-47ad-834c-738b43737da6" title="app.py" contentType="text/python">
+```python
 import os
 import logging
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, render_template, current_app
+from flask import Flask, request, jsonify, render_template, current_app, redirect, url_for
 from flask_jwt_extended import JWTManager, jwt_required, create_access_token
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -81,17 +83,17 @@ celery.conf.update(app.config)
 @app.errorhandler(Exception)
 def handle_unhandled_exception(e):
     logger.error(f"Unhandled exception: {str(e)}", exc_info=True)
-    return jsonify({'error': 'Internal server error'}), 500
+    return render_template('error.html', error='Internal server error'), 500
 
 @app.errorhandler(HTTPException)
 def handle_http_exception(e):
     logger.warning(f"HTTP exception: {e.code} - {str(e)}")
-    return jsonify({'error': str(e)}), e.code
+    return render_template('error.html', error=f"{e.code} - {e.name}: {e.description}"), e.code
 
 @app.errorhandler(500)
 def internal_error(error):
     logger.error(f"500 Internal Server Error: {str(error)}", exc_info=True)
-    return jsonify({'error': 'Internal server error'}), 500
+    return render_template('error.html', error='Internal server error'), 500
 
 # Haversine formula for distance calculation
 def haversine(lat1, lon1, lat2, lon2):
@@ -113,7 +115,7 @@ def geocode_address(address: str) -> Dict[str, float]:
         response = requests.get(
             "https://nominatim.openstreetmap.org/search",
             params={"q": address, "format": "json", "limit": 1},
-            headers={"User-Agent": "CourierTrackingApp/1.0 (contact@yourdomain.com)"},  # Required by Nominatim
+            headers={"User-Agent": "CourierTrackingApp/1.0 (contact@yourdomain.com)"},
             timeout=5
         )
         response.raise_for_status()
@@ -417,6 +419,27 @@ checkpoint_model = api.model('Checkpoint', {
     'proof_photo': fields.String
 })
 
+# Homepage route
+@app.route('/')
+def index():
+    try:
+        shipments = Shipment.query.all()
+        return render_template('index.html', shipments=shipments)
+    except Exception as e:
+        logger.error(f"Index error: {e}")
+        return render_template('error.html', error='Failed to load homepage'), 500
+
+# Admin dashboard route
+@app.route('/admin')
+@jwt_required()
+def admin():
+    try:
+        shipments = Shipment.query.all()
+        return render_template('admin.html', shipments=shipments)
+    except Exception as e:
+        logger.error(f"Admin dashboard error: {e}")
+        return render_template('error.html', error='Failed to load admin dashboard'), 500
+
 # Keep-Alive / Ping endpoint for uptime monitoring
 @app.route('/ping', methods=['GET'])
 @limiter.limit("1000 per day")
@@ -450,36 +473,37 @@ def health():
         return jsonify({'status': 'unhealthy'}), 500
 
 # Routes
-@app.route('/login', methods=['POST'])
+@app.route('/login', methods=['GET', 'POST'])
 def login():
     try:
-        data = request.get_json()
-        if data.get('password') and check_password_hash(app.config['ADMIN_PASSWORD_HASH'], data['password']):
-            access_token = create_access_token(identity='admin')
-            return jsonify({'access_token': access_token})
-        return jsonify({'error': 'Invalid password'}), 401
+        if request.method == 'POST':
+            data = request.form
+            if data.get('password') and check_password_hash(app.config['ADMIN_PASSWORD_HASH'], data['password']):
+                access_token = create_access_token(identity='admin')
+                response = redirect(url_for('admin'))
+                response.set_cookie('access_token', access_token, httponly=True)
+                return response
+            return render_template('error.html', error='Invalid password'), 401
+        return '''
+        <form method="POST">
+            <label>Password: <input type="password" name="password"></label>
+            <button type="submit">Login</button>
+        </form>
+        '''
     except Exception as e:
         logger.error(f"Login error: {e}")
-        return jsonify({'error': 'Login failed'}), 400
+        return render_template('error.html', error='Login failed'), 400
 
-@app.route('/unsubscribe/<tracking>')
-def unsubscribe(tracking):
+@app.route('/track', methods=['GET'])
+def track_redirect():
     try:
-        email = request.args.get('email')
-        if not email:
-            return jsonify({'error': 'Email is required'}), 400
-        shipment = Shipment.query.filter_by(tracking=tracking).first()
-        if not shipment:
-            return jsonify({'error': 'Shipment not found'}), 404
-        subscriber = Subscriber.query.filter_by(shipment_id=shipment.id, email=email).first()
-        if not subscriber:
-            return jsonify({'error': 'Subscriber not found'}), 404
-        subscriber.is_active = False
-        db.session.commit()
-        return jsonify({'message': 'Unsubscribed successfully'})
+        tracking = request.args.get('tracking')
+        if tracking:
+            return redirect(url_for('track', tracking=tracking))
+        return render_template('error.html', error='Tracking number required'), 400
     except Exception as e:
-        logger.error(f"Unsubscribe error: {e}")
-        return jsonify({'error': 'Failed to unsubscribe'}), 500
+        logger.error(f"Track redirect error: {e}")
+        return render_template('error.html', error='Failed to redirect to tracking'), 500
 
 @app.route('/track/<tracking>')
 @cache.cached(timeout=300, query_string=True)
@@ -489,7 +513,7 @@ def track(tracking):
         per_page = request.args.get('per_page', 10, type=int)
         shipment = Shipment.query.filter_by(tracking=tracking).first()
         if not shipment:
-            return jsonify({'error': 'Shipment not found'}), 404
+            return render_template('error.html', error='Shipment not found'), 404
         pagination = Checkpoint.query.filter_by(shipment_id=shipment.id).order_by(Checkpoint.position).paginate(page=page, per_page=per_page, error_out=False)
         checkpoints = [cp.to_dict() for cp in pagination.items]
         history = [h.to_dict() for h in shipment.history]
@@ -506,7 +530,7 @@ def track(tracking):
         )
     except Exception as e:
         logger.error(f"Track error for {tracking}: {e}")
-        return jsonify({'error': 'Failed to retrieve tracking data'}), 500
+        return render_template('error.html', error='Failed to retrieve tracking data'), 500
 
 @socketio.on('connect', namespace='/')
 def handle_connect():
@@ -546,7 +570,7 @@ class ShipmentList(Resource):
     @api.expect(shipment_model)
     def post(self):
         try:
-            data = ShipmentCreate(**request.get_json()).dict()
+            data = ShipmentCreate(**request.get_json() or request.form).dict()
             origin = data['origin']
             destination = data['destination']
             if isinstance(origin, str):
@@ -576,25 +600,36 @@ class ShipmentList(Resource):
             )
             shipment.calculate_distance_and_eta()
             db.session.add(shipment)
-            # Add initial status to history
             status_history = StatusHistory(shipment=shipment, status=data['status'])
             db.session.add(status_history)
             db.session.commit()
             socketio.emit('update', shipment.to_dict(), namespace='/', room=shipment.tracking)
+            if request.form:
+                return redirect(url_for('admin'))
             return shipment.to_dict(), 201
         except ValidationError as e:
+            if request.form:
+                return render_template('admin.html', shipments=Shipment.query.all(), error=str(e)), 400
             return {'error': str(e)}, 400
         except ValueError as e:
+            if request.form:
+                return render_template('admin.html', shipments=Shipment.query.all(), error=str(e)), 400
             return {'error': str(e)}, 400
         except IntegrityError:
             db.session.rollback()
+            if request.form:
+                return render_template('admin.html', shipments=Shipment.query.all(), error='Tracking number already exists'), 409
             return {'error': 'Tracking number already exists'}, 409
         except SQLAlchemyError as e:
             db.session.rollback()
             logger.error(f"Database error: {e}")
+            if request.form:
+                return render_template('admin.html', shipments=Shipment.query.all(), error='Database error'), 500
             return {'error': 'Database error'}, 500
         except Exception as e:
             logger.error(f"Shipment creation error: {e}")
+            if request.form:
+                return render_template('admin.html', shipments=Shipment.query.all(), error='Failed to create shipment'), 500
             return {'error': 'Failed to create shipment'}, 500
 
 @ns.route('/<tracking>/checkpoints')
@@ -906,6 +941,25 @@ def telegram_webhook(token):
         logger.error(f"Telegram webhook error: {e}")
         send_message("Unexpected error.", reply_markup=get_navigation_keyboard())
         return jsonify({'error': 'Unexpected error'}), 500
+
+@app.route('/unsubscribe/<tracking>')
+def unsubscribe(tracking):
+    try:
+        email = request.args.get('email')
+        if not email:
+            return render_template('error.html', error='Email is required'), 400
+        shipment = Shipment.query.filter_by(tracking=tracking).first()
+        if not shipment:
+            return render_template('error.html', error='Shipment not found'), 404
+        subscriber = Subscriber.query.filter_by(shipment_id=shipment.id, email=email).first()
+        if not subscriber:
+            return render_template('error.html', error='Subscriber not found'), 404
+        subscriber.is_active = False
+        db.session.commit()
+        return jsonify({'message': 'Unsubscribed successfully'})
+    except Exception as e:
+        logger.error(f"Unsubscribe error: {e}")
+        return render_template('error.html', error='Failed to unsubscribe'), 500
 
 if __name__ == '__main__':
     with app.app_context():
