@@ -60,7 +60,8 @@ logger = logging.getLogger(__name__)
 # Flask app setup
 app = Flask(__name__)
 app.config.from_prefixed_env()
-app.config['SQLALCHEMY_DATABASE_URI'] = env('DATABASE_URL')
+app.config['SQLALCHEMY_DATABASE_URI'] = env('DATABASE_URL').replace('postgresql://', 'postgresql+psycopg://')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['RATELIMIT_STORAGE_URL'] = env('REDIS_URL')
 app.config['ADMIN_PASSWORD_HASH'] = env('ADMIN_PASSWORD_HASH')
 app.config['TELEGRAM_TOKEN'] = env('TELEGRAM_TOKEN')
@@ -74,7 +75,13 @@ app.config['SECRET_KEY'] = env.str('SECRET_KEY', default=os.urandom(24))
 
 socketio = SocketIO(app, async_mode='threading')
 jwt = JWTManager(app)
-limiter = Limiter(key_func=get_remote_address, default_limits=["200 per day", "50 per hour"])
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    storage_uri=env('REDIS_URL'),
+    storage_options={},
+    default_limits=["200 per day", "50 per hour"]
+)
 limiter.init_app(app)
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
@@ -1345,3 +1352,4 @@ if __name__ == '__main__':
     with app.app_context():
         db.create_all()
     socketio.run(app, debug=False, host='0.0.0.0', port=5000)
+```
