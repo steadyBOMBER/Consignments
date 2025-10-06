@@ -13,7 +13,5 @@ werkzeug==3.0.3
 retry==0.9.2
 requests==2.31.0
 gunicorn==21.2.0
-eventlet==0.33.3
 python-dotenv==1.0.0
 cryptography==36.0.2
-gevent==23.9.1 
