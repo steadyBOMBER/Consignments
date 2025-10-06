@@ -1,3 +1,4 @@
+```python
 import os
 import logging
 import smtplib
@@ -19,7 +20,7 @@ from flask_wtf import FlaskForm
 from wtforms import StringField, SelectField, SubmitField, TextAreaField, IntegerField
 from wtforms.validators import DataRequired, Length, Optional, NumberRange
 from pydantic import BaseModel, validator, ValidationError
-from typing import Optional, Dict, List, Union
+from typing import Optional as TypingOptional, Dict, List, Union
 from celery import Celery, shared_task
 from retry import retry
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -108,7 +109,7 @@ class CheckpointForm(FlaskForm):
     tracking = StringField('Tracking Number', validators=[DataRequired(), Length(min=1, max=50)])
     location = StringField('Location (address or lat,lng)', validators=[DataRequired()])
     label = StringField('Label', validators=[DataRequired(), Length(min=1, max=100)])
-    note = TextAreaField('Note', validators=[Optional(), Length(max=500)])
+    note = TextAreaField('Note', validators=[Optional(), Length(max=500)])  # Fixed: Use wtforms.validators.Optional
     status = SelectField('Status', choices=[
         ('', 'No Change'),
         ('Created', 'Created'),
@@ -336,13 +337,13 @@ class Coordinate(BaseModel):
         return v
 
 class CheckpointCreate(BaseModel):
-    lat: Optional[float] = None
-    lng: Optional[float] = None
-    address: Optional[str] = None
+    lat: TypingOptional[float] = None
+    lng: TypingOptional[float] = None
+    address: TypingOptional[str] = None
     label: str
-    note: Optional[str] = None
-    status: Optional[str] = None
-    proof_photo: Optional[str] = None
+    note: TypingOptional[str] = None
+    status: TypingOptional[str] = None
+    proof_photo: TypingOptional[str] = None
     @validator('label')
     def check_label(cls, v):
         if not v.strip():
@@ -1352,3 +1353,4 @@ if __name__ == '__main__':
     with app.app_context():
         db.create_all()
     socketio.run(app, debug=False, host='0.0.0.0', port=5000)
+```
