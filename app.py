@@ -27,11 +27,21 @@ logger = logging.getLogger(__name__)
 # Flask app setup
 app = Flask(__name__)
 app.config.from_prefixed_env()
+
+# Ensure SQLAlchemy gets its DB URI from DATABASE_URL
+if "DATABASE_URL" in os.environ:
+    app.config["SQLALCHEMY_DATABASE_URI"] = os.environ["DATABASE_URL"]
+# Flask-Limiter: use Redis if available for production rate limiting
+if "REDIS_URL" in os.environ:
+    app.config["RATELIMIT_STORAGE_URL"] = os.environ["REDIS_URL"]
+
 socketio = SocketIO(app, async_mode='threading')  # Use threading for gthread worker
 jwt = JWTManager(app)
+
 # Updated Flask-Limiter 3.x+ initialization:
 limiter = Limiter(key_func=get_remote_address, default_limits=["200 per day", "50 per hour"])
 limiter.init_app(app)
+
 db = SQLAlchemy(app)
 cache = Cache(app, config={'CACHE_TYPE': 'redis', 'CACHE_REDIS_URL': os.getenv('REDIS_URL')})
 
