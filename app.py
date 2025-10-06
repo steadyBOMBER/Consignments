@@ -29,7 +29,9 @@ app = Flask(__name__)
 app.config.from_prefixed_env()
 socketio = SocketIO(app, async_mode='threading')  # Use threading for gthread worker
 jwt = JWTManager(app)
-limiter = Limiter(app, key_func=get_remote_address, default_limits=["200 per day", "50 per hour"])
+# Updated Flask-Limiter 3.x+ initialization:
+limiter = Limiter(key_func=get_remote_address, default_limits=["200 per day", "50 per hour"])
+limiter.init_app(app)
 db = SQLAlchemy(app)
 cache = Cache(app, config={'CACHE_TYPE': 'redis', 'CACHE_REDIS_URL': os.getenv('REDIS_URL')})
 
