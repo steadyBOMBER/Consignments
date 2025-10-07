@@ -78,7 +78,7 @@ jwt = JWTManager(app)
 limiter = Limiter(
     app=app,
     key_func=get_remote_address,
-    storage_uri=env('REDIS_URL'),
+    storage_uri="memory://",  # Changed to in-memory storage to bypass Redis issue
     storage_options={},
     default_limits=["200 per day", "50 per hour"]
 )
@@ -108,7 +108,7 @@ class CheckpointForm(FlaskForm):
     tracking = StringField('Tracking Number', validators=[DataRequired(), Length(min=1, max=50)])
     location = StringField('Location (address or lat,lng)', validators=[DataRequired()])
     label = StringField('Label', validators=[DataRequired(), Length(min=1, max=100)])
-    note = TextAreaField('Note', validators=[Optional(), Length(max=500)])  # Fixed: Use wtforms.validators.Optional
+    note = TextAreaField('Note', validators=[Optional(), Length(max=500)])
     status = SelectField('Status', choices=[
         ('', 'No Change'),
         ('Created', 'Created'),
@@ -460,9 +460,9 @@ class SimulationState(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     shipment_id = db.Column(db.Integer, db.ForeignKey('shipment.id'), nullable=False)
     tracking = db.Column(db.String(50), nullable=False)
-    status = db.Column(db.String(20), nullable=False, default='running')  # running, paused
+    status = db.Column(db.String(20), nullable=False, default='running')
     current_position = db.Column(db.Integer, nullable=False, default=0)
-    waypoints = db.Column(db.Text, nullable=False)  # JSON string of waypoints
+    waypoints = db.Column(db.Text, nullable=False)
     current_time = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     num_points = db.Column(db.Integer, nullable=False)
     step_hours = db.Column(db.Integer, nullable=False)
@@ -509,7 +509,6 @@ def admin():
         shipments = Shipment.query.all()
         simulation_states = SimulationState.query.all()
 
-        # Handle Shipment Form submission
         if shipment_form.submit.data and shipment_form.validate_on_submit():
             data = {
                 'tracking_number': shipment_form.tracking.data,
@@ -569,7 +568,6 @@ def admin():
                 logger.error(f"Shipment creation error: {e}")
                 return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, simulation_form=simulation_form, shipments=shipments, simulation_states=simulation_states, error='Failed to create shipment'), 500
 
-        # Handle Checkpoint Form submission
         if checkpoint_form.submit.data and checkpoint_form.validate_on_submit():
             tracking = checkpoint_form.tracking.data
             shipment = Shipment.query.filter_by(tracking=tracking).first()
@@ -629,7 +627,6 @@ def admin():
                 logger.error(f"Checkpoint creation error for {tracking}: {e}")
                 return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, simulation_form=simulation_form, shipments=shipments, simulation_states=simulation_states, error='Failed to add checkpoint'), 500
 
-        # Handle Simulation Form submission
         if simulation_form.submit.data and simulation_form.validate_on_submit():
             tracking = simulation_form.tracking.data
             num_points = simulation_form.num_points.data
@@ -643,7 +640,6 @@ def admin():
                 simulation_state = SimulationState.query.filter_by(shipment_id=shipment.id).first()
                 if simulation_state and simulation_state.status == 'running':
                     return render_template('admin.html', shipment_form=shipment_form, checkpoint_form=checkpoint_form, simulation_form=simulation_form, shipments=shipments, simulation_states=simulation_states, error='Simulation already running'), 400
-                # Start or resume simulation
                 run_simulation(shipment, num_points, step_hours, simulation_state)
                 return redirect(url_for('admin'))
             except ValueError as e:
@@ -669,20 +665,17 @@ def run_simulation(shipment, num_points, step_hours, simulation_state=None):
         max_status_index = len(status_sequence) - 1
 
         if simulation_state and simulation_state.status == 'paused':
-            # Resume from paused state
             waypoints = json.loads(simulation_state.waypoints)
             current_time = simulation_state.current_time
             start_position = simulation_state.current_position
             num_points = simulation_state.num_points
             step_hours = simulation_state.step_hours
         else:
-            # Start new simulation
             if num_points < 2 or step_hours < 1:
                 raise ValueError("Number of points must be at least 2, step hours must be at least 1")
             waypoints = generate_waypoints(shipment.origin_lat, shipment.origin_lng, shipment.dest_lat, shipment.dest_lng, num_points)
             current_time = datetime.utcnow()
             start_position = 0
-            # Save initial simulation state
             simulation_state = SimulationState(
                 shipment_id=shipment.id,
                 tracking=shipment.tracking,
@@ -728,7 +721,6 @@ def run_simulation(shipment, num_points, step_hours, simulation_state=None):
                 db.session.add(status_history)
                 if status == 'Delivered':
                     shipment.eta = current_time
-            # Update simulation state
             simulation_state.current_position = i
             simulation_state.current_time = current_time
             db.session.commit()
@@ -738,13 +730,11 @@ def run_simulation(shipment, num_points, step_hours, simulation_state=None):
                     send_checkpoint_email_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.email)
                     if subscriber.phone:
                         send_checkpoint_sms_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.phone)
-            # Check if simulation is paused
             db.session.refresh(simulation_state)
             if simulation_state.status == 'paused':
                 logger.info(f"Simulation paused for {shipment.tracking} at position {i}")
                 break
         else:
-            # Simulation completed
             SimulationState.query.filter_by(shipment_id=shipment.id).delete()
             db.session.commit()
             logger.info(f"Simulation completed for {shipment.tracking}")
