@@ -1338,6 +1338,14 @@ def unsubscribe(tracking):
         logger.error(f"Unsubscribe error: {e}")
         return render_template('error.html', error='Failed to unsubscribe'), 500
 
+@app.route('/')
+def index():
+    try:
+        return render_template('index.html')
+    except Exception as e:
+        logger.error(f"Index route error: {e}")
+        return render_template('error.html', error='Failed to load homepage'), 500
+
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
