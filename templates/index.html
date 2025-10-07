@@ -5,137 +5,25 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Courier Tracking Service</title>
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
-    <style>
-        .error { border-color: #ef4444; }
-        .valid { border-color: #10b981; }
-        .fade-in { animation: fadeIn 0.5s; }
-        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-    </style>
 </head>
-<body class="bg-gray-100 font-sans min-h-screen flex items-center justify-center">
-    <div class="max-w-lg w-full bg-white shadow-lg rounded-lg p-8 m-4">
-        <h1 class="text-3xl font-bold text-center text-blue-600 mb-6">Courier Tracking Service</h1>
-
-        <!-- Tracking Form -->
-        <form id="tracking-form" action="{{ url_for('track_redirect') }}" method="GET" class="space-y-4">
-            <div>
-                <label for="tracking" class="block text-sm font-medium text-gray-700">Enter Tracking Number</label>
-                <input type="text" id="tracking" name="tracking" class="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-2 focus:ring-blue-500 focus:border-blue-500" placeholder="e.g., TEST123" required>
-                <p id="tracking-error" class="text-sm text-red-500 hidden mt-1"></p>
-                <p id="tracking-status" class="text-sm text-gray-600 mt-1 hidden"></p>
-            </div>
-            <button type="submit" class="w-full bg-blue-600 text-white font-semibold py-2 px-4 rounded hover:bg-blue-700 transition duration-200">Track Shipment</button>
-        </form>
-
-        <!-- Live Update Notification -->
-        <div id="live-update" class="mt-4 p-4 bg-blue-100 text-blue-800 rounded-md hidden fade-in">
-            <p><strong>Live Update:</strong> <span id="update-message"></span></p>
+<body class="bg-gray-100 font-sans">
+    <div class="max-w-4xl mx-auto p-6">
+        <h1 class="text-3xl font-bold mb-6 text-center">Welcome to Courier Tracking Service</h1>
+        <div class="bg-white shadow-md rounded-lg p-6 mb-6">
+            <h2 class="text-2xl font-semibold mb-4">Track a Shipment</h2>
+            <form method="GET" action="{{ url_for('track_redirect') }}">
+                <div class="mb-4">
+                    <label class="block text-gray-700">Tracking Number</label>
+                    <input type="text" name="tracking" class="w-full p-2 border rounded" required maxlength="50">
+                </div>
+                <button type="submit" class="bg-blue-600 text-white py-2 px-4 rounded hover:bg-blue-700">Track Shipment</button>
+            </form>
         </div>
-
-        <!-- Admin Link -->
-        <div class="mt-4 text-center">
-            <a href="{{ url_for('login') }}" class="text-blue-600 hover:underline font-medium">Admin Dashboard</a>
-        </div>
-
-        <!-- Telegram Bot Instructions -->
-        <div class="mt-6">
-            <button id="toggle-telegram" class="w-full text-left text-blue-600 hover:underline font-medium focus:outline-none">Show Telegram Bot Instructions</button>
-            <div id="telegram-instructions" class="mt-2 text-sm text-gray-600 hidden">
-                <p>Use our Telegram bot to manage shipments:</p>
-                <p><a href="https://t.me/YourBotName" class="text-blue-600 hover:underline" target="_blank">@YourBotName</a></p>
-                <p>Commands:</p>
-                <ul class="list-disc list-inside">
-                    <li><code>/create TEST123|Test Shipment|Lagos, Nigeria|Abuja, Nigeria</code> - Create a shipment</li>
-                    <li><code>/subscribe TEST123|user@example.com</code> - Subscribe to updates</li>
-                    <li><code>/addcp TEST123|Ikeja, Lagos|Picked Up|Package collected</code> - Add a checkpoint</li>
-                    <li><code>/simulate TEST123|5|1</code> - Simulate 5 checkpoints, 1 hour apart</li>
-                    <li><code>/track_multiple TEST123,TEST456</code> - Track multiple shipments</li>
-                </ul>
-            </div>
-        </div>
-
-        <!-- Footer -->
-        <div class="mt-6 text-center text-sm text-gray-500">
-            <p>&copy; {{ 2025 }} Courier Tracking Service. All rights reserved.</p>
+        <div class="bg-white shadow-md rounded-lg p-6">
+            <h2 class="text-2xl font-semibold mb-4">Admin Access</h2>
+            <p class="mb-4">Manage shipments and checkpoints.</p>
+            <a href="{{ url_for('login') }}" class="inline-block bg-blue-600 text-white py-2 px-4 rounded hover:bg-blue-700">Go to Admin Dashboard</a>
         </div>
     </div>
-
-    <script>
-        // WebSocket connection
-        const socket = io.connect('{{ url_for("index", _external=True) }}', { path: '/socket.io' });
-        socket.on('connect', () => {
-            console.log('Connected to WebSocket');
-        });
-        socket.on('update', (data) => {
-            const updateDiv = document.getElementById('live-update');
-            const updateMessage = document.getElementById('update-message');
-            updateMessage.textContent = `Shipment ${data.tracking} updated to ${data.status} at ${new Date(data.eta).toLocaleString()}`;
-            updateDiv.classList.remove('hidden');
-            setTimeout(() => updateDiv.classList.add('hidden'), 5000); // Hide after 5s
-        });
-        socket.on('error', (data) => {
-            console.error('WebSocket error:', data.message);
-        });
-
-        // Tracking number validation
-        const trackingInput = document.getElementById('tracking');
-        const trackingError = document.getElementById('tracking-error');
-        const trackingStatus = document.getElementById('tracking-status');
-        let debounceTimeout;
-
-        trackingInput.addEventListener('input', () => {
-            clearTimeout(debounceTimeout);
-            debounceTimeout = setTimeout(async () => {
-                const tracking = trackingInput.value.trim();
-                trackingError.classList.add('hidden');
-                trackingStatus.classList.add('hidden');
-                trackingInput.classList.remove('error', 'valid');
-
-                if (!tracking) {
-                    return;
-                }
-
-                // Basic format check (e.g., alphanumeric, 3-50 characters)
-                if (!/^[a-zA-Z0-9]{3,50}$/.test(tracking)) {
-                    trackingError.textContent = 'Tracking number must be 3-50 alphanumeric characters';
-                    trackingError.classList.remove('hidden');
-                    trackingInput.classList.add('error');
-                    return;
-                }
-
-                // Check if shipment exists via API
-                try {
-                    const response = await fetch('{{ url_for("shipments.track_multiple") }}', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify([tracking])
-                    });
-                    const data = await response.json();
-                    if (data.shipments && data.shipments.length > 0) {
-                        trackingStatus.textContent = `Status: ${data.shipments[0].status} (ETA: ${new Date(data.shipments[0].eta).toLocaleString()})`;
-                        trackingStatus.classList.remove('hidden');
-                        trackingInput.classList.add('valid');
-                        socket.emit('subscribe', tracking); // Join WebSocket room
-                    } else {
-                        trackingError.textContent = 'Shipment not found';
-                        trackingError.classList.remove('hidden');
-                        trackingInput.classList.add('error');
-                    }
-                } catch (error) {
-                    trackingError.textContent = 'Error checking tracking number';
-                    trackingError.classList.remove('hidden');
-                    trackingInput.classList.add('error');
-                }
-            }, 500); // Debounce for 500ms
-        });
-
-        // Toggle Telegram instructions
-        document.getElementById('toggle-telegram').addEventListener('click', () => {
-            const instructions = document.getElementById('telegram-instructions');
-            instructions.classList.toggle('hidden');
-            instructions.classList.toggle('fade-in');
-        });
-    </script>
 </body>
 </html>
