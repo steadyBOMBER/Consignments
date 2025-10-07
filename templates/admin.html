@@ -3,200 +3,140 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin Dashboard - Courier Tracking</title>
+    <title>Admin Dashboard</title>
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
 </head>
 <body class="bg-gray-100 font-sans">
-    <div class="container mx-auto p-6">
-        <div class="bg-white shadow-md rounded-lg overflow-hidden">
-            <div class="bg-blue-600 text-white text-center py-4">
-                <h1 class="text-2xl font-bold">Admin Dashboard - Courier Tracking</h1>
+    <div class="max-w-4xl mx-auto p-6">
+        <h1 class="text-3xl font-bold mb-6">Admin Dashboard</h1>
+
+        {% if error %}
+            <div class="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 mb-6" role="alert">
+                <p>{{ error }}</p>
             </div>
-            <div class="p-6">
-                {% if error %}
-                <div class="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 mb-6" role="alert">
-                    <p>{{ error }}</p>
-                </div>
-                {% endif %}
+        {% endif %}
 
-                <!-- Shipment Form -->
-                <div class="mb-8">
-                    <h2 class="text-xl font-semibold text-gray-800 mb-4">Create Shipment</h2>
-                    <form method="POST" class="space-y-4">
-                        {{ shipment_form.hidden_tag() }}
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div>
-                                <label class="block text-gray-700">{{ shipment_form.tracking.label }}</label>
-                                {{ shipment_form.tracking(class="w-full p-2 border rounded") }}
-                            </div>
-                            <div>
-                                <label class="block text-gray-700">{{ shipment_form.title.label }}</label>
-                                {{ shipment_form.title(class="w-full p-2 border rounded") }}
-                            </div>
-                            <div>
-                                <label class="block text-gray-700">{{ shipment_form.origin.label }}</label>
-                                {{ shipment_form.origin(class="w-full p-2 border rounded") }}
-                            </div>
-                            <div>
-                                <label class="block text-gray-700">{{ shipment_form.destination.label }}</label>
-                                {{ shipment_form.destination(class="w-full p-2 border rounded") }}
-                            </div>
-                            <div>
-                                <label class="block text-gray-700">{{ shipment_form.status.label }}</label>
-                                {{ shipment_form.status(class="w-full p-2 border rounded") }}
-                            </div>
-                        </div>
-                        <div>
-                            {{ shipment_form.submit(class="bg-blue-600 text-white font-semibold py-2 px-4 rounded hover:bg-blue-700") }}
-                        </div>
-                    </form>
+        <!-- Shipment Creation Form -->
+        <div class="bg-white shadow-md rounded-lg p-6 mb-6">
+            <h2 class="text-2xl font-semibold mb-4">Create Shipment</h2>
+            <form method="POST" action="{{ url_for('admin') }}">
+                <input type="hidden" name="form_type" value="shipment">
+                <div class="mb-4">
+                    <label class="block text-gray-700">Tracking Number</label>
+                    <input type="text" name="tracking" class="w-full p-2 border rounded" required maxlength="50">
                 </div>
-
-                <!-- Checkpoint Form -->
-                <div class="mb-8">
-                    <h2 class="text-xl font-semibold text-gray-800 mb-4">Add Checkpoint</h2>
-                    <form method="POST" class="space-y-4">
-                        {{ checkpoint_form.hidden_tag() }}
-                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div>
-                                <label class="block text-gray-700">{{ checkpoint_form.tracking.label }}</label>
-                                {{ checkpoint_form.tracking(class="w-full p-2 border rounded") }}
-                            </div>
-                            <div>
-                                <label class="block text-gray-700">{{ checkpoint_form.location.label }}</label>
-                                {{ checkpoint_form.location(class="w-full p-2 border rounded") }}
-                            </div>
-                            <div>
-                                <label class="block text-gray-700">{{ checkpoint_form.label.label }}</label>
-                                {{ checkpoint_form.label(class="w-full p-2 border rounded") }}
-                            </div>
-                            <div>
-                                <label class="block text-gray-700">{{ checkpoint_form.status.label }}</label>
-                                {{ checkpoint_form.status(class="w-full p-2 border rounded") }}
-                            </div>
-                            <div class="md:col-span-2">
-                                <label class="block text-gray-700">{{ checkpoint_form.note.label }}</label>
-                                {{ checkpoint_form.note(class="w-full p-2 border rounded") }}
-                            </div>
-                            <div>
-                                <label class="block text-gray-700">{{ checkpoint_form.proof_photo.label }}</label>
-                                {{ checkpoint_form.proof_photo(class="w-full p-2 border rounded") }}
-                            </div>
-                        </div>
-                        <div>
-                            {{ checkpoint_form.submit(class="bg-blue-600 text-white font-semibold py-2 px-4 rounded hover:bg-blue-700") }}
-                        </div>
-                    </form>
+                <div class="mb-4">
+                    <label class="block text-gray-700">Title</label>
+                    <input type="text" name="title" class="w-full p-2 border rounded" value="Consignment" maxlength="100">
                 </div>
-
-                <!-- Simulation Form -->
-                <div class="mb-8">
-                    <h2 class="text-xl font-semibold text-gray-800 mb-4">Start Simulation</h2>
-                    <form method="POST" class="space-y-4">
-                        {{ simulation_form.hidden_tag() }}
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                            <div>
-                                <label class="block text-gray-700">{{ simulation_form.tracking.label }}</label>
-                                {{ simulation_form.tracking(class="w-full p-2 border rounded") }}
-                            </div>
-                            <div>
-                                <label class="block text-gray-700">{{ simulation_form.num_points.label }}</label>
-                                {{ simulation_form.num_points(class="w-full p-2 border rounded") }}
-                            </div>
-                            <div>
-                                <label class="block text-gray-700">{{ simulation_form.step_hours.label }}</label>
-                                {{ simulation_form.step_hours(class="w-full p-2 border rounded") }}
-                            </div>
-                        </div>
-                        <div>
-                            {{ simulation_form.submit(class="bg-blue-600 text-white font-semibold py-2 px-4 rounded hover:bg-blue-700") }}
-                        </div>
-                    </form>
+                <div class="mb-4">
+                    <label class="block text-gray-700">Origin (address or lat,lng)</label>
+                    <input type="text" name="origin" class="w-full p-2 border rounded" required>
                 </div>
+                <div class="mb-4">
+                    <label class="block text-gray-700">Destination (address or lat,lng)</label>
+                    <input type="text" name="destination" class="w-full p-2 border rounded" required>
+                </div>
+                <div class="mb-4">
+                    <label class="block text-gray-700">Status</label>
+                    <select name="status" class="w-full p-2 border rounded" required>
+                        <option value="Created">Created</option>
+                        <option value="In Transit">In Transit</option>
+                        <option value="Out for Delivery">Out for Delivery</option>
+                        <option value="Delivered">Delivered</option>
+                    </select>
+                </div>
+                <button type="submit" class="bg-blue-600 text-white py-2 px-4 rounded hover:bg-blue-700">Create Shipment</button>
+            </form>
+        </div>
 
-                <!-- Simulations Table -->
-                <div class="mb-8">
-                    <h2 class="text-xl font-semibold text-gray-800 mb-4">Active Simulations</h2>
-                    {% if simulation_states %}
-                    <div class="overflow-x-auto">
-                        <table class="min-w-full bg-white border">
-                            <thead>
-                                <tr>
-                                    <th class="py-2 px-4 border-b text-left text-gray-700">Tracking Number</th>
-                                    <th class="py-2 px-4 border-b text-left text-gray-700">Status</th>
-                                    <th class="py-2 px-4 border-b text-left text-gray-700">Progress</th>
-                                    <th class="py-2 px-4 border-b text-left text-gray-700">Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
+        <!-- Checkpoint Creation Form -->
+        <div class="bg-white shadow-md rounded-lg p-6 mb-6">
+            <h2 class="text-2xl font-semibold mb-4">Add Checkpoint</h2>
+            <form method="POST" action="{{ url_for('admin') }}">
+                <input type="hidden" name="form_type" value="checkpoint">
+                <div class="mb-4">
+                    <label class="block text-gray-700">Tracking Number</label>
+                    <input type="text" name="tracking" class="w-full p-2 border rounded" required maxlength="50">
+                </div>
+                <div class="mb-4">
+                    <label class="block text-gray-700">Location (address or lat,lng)</label>
+                    <input type="text" name="location" class="w-full p-2 border rounded" required>
+                </div>
+                <div class="mb-4">
+                    <label class="block text-gray-700">Label</label>
+                    <input type="text" name="label" class="w-full p-2 border rounded" required maxlength="100">
+                </div>
+                <div class="mb-4">
+                    <label class="block text-gray-700">Note</label>
+                    <textarea name="note" class="w-full p-2 border rounded" maxlength="500"></textarea>
+                </div>
+                <div class="mb-4">
+                    <label class="block text-gray-700">Status</label>
+                    <select name="status" class="w-full p-2 border rounded">
+                        <option value="">No Change</option>
+                        <option value="Created">Created</option>
+                        <option value="In Transit">In Transit</option>
+                        <option value="Out for Delivery">Out for Delivery</option>
+                        <option value="Delivered">Delivered</option>
+                    </select>
+                </div>
+                <div class="mb-4">
+                    <label class="block text-gray-700">Proof Photo URL</label>
+                    <input type="text" name="proof_photo" class="w-full p-2 border rounded" maxlength="500">
+                </div>
+                <button type="submit" class="bg-blue-600 text-white py-2 px-4 rounded hover:bg-blue-700">Add Checkpoint</button>
+            </form>
+        </div>
+
+        <!-- Simulation Form -->
+        <div class="bg-white shadow-md rounded-lg p-6 mb-6">
+            <h2 class="text-2xl font-semibold mb-4">Start Simulation</h2>
+            <form method="POST" action="{{ url_for('admin') }}">
+                <input type="hidden" name="form_type" value="simulation">
+                <div class="mb-4">
+                    <label class="block text-gray-700">Tracking Number</label>
+                    <input type="text" name="tracking" class="w-full p-2 border rounded" required maxlength="50">
+                </div>
+                <div class="mb-4">
+                    <label class="block text-gray-700">Number of Checkpoints (2-10)</label>
+                    <input type="number" name="num_points" class="w-full p-2 border rounded" required min="2" max="10">
+                </div>
+                <div class="mb-4">
+                    <label class="block text-gray-700">Step Hours (1-24)</label>
+                    <input type="number" name="step_hours" class="w-full p-2 border rounded" required min="1" max="24">
+                </div>
+                <button type="submit" class="bg-blue-600 text-white py-2 px-4 rounded hover:bg-blue-700">Start Simulation</button>
+            </form>
+        </div>
+
+        <!-- Shipments List -->
+        <div class="bg-white shadow-md rounded-lg p-6 mb-6">
+            <h2 class="text-2xl font-semibold mb-4">Shipments</h2>
+            {% if shipments %}
+                <ul class="space-y-2">
+                    {% for shipment in shipments %}
+                        <li class="border-b py-2">
+                            <a href="{{ url_for('track', tracking=shipment.tracking) }}" class="text-blue-600 hover:underline">
+                                {{ shipment.title }} ({{ shipment.tracking }}): {{ shipment.status }}
+                            </a>
+                            {% if simulation_states %}
                                 {% for state in simulation_states %}
-                                <tr>
-                                    <td class="py-2 px-4 border-b">{{ state.tracking }}</td>
-                                    <td class="py-2 px-4 border-b">{{ state.status | capitalize }}</td>
-                                    <td class="py-2 px-4 border-b">{{ state.current_position }} / {{ state.num_points }}</td>
-                                    <td class="py-2 px-4 border-b">
-                                        {% if state.status == 'running' %}
-                                        <form method="POST" action="{{ url_for('pause_simulation', tracking=state.tracking) }}" class="inline">
-                                            <button type="submit" class="bg-yellow-500 text-white font-semibold py-1 px-3 rounded hover:bg-yellow-600">Pause</button>
+                                    {% if state.tracking == shipment.tracking %}
+                                        <form method="POST" action="{{ url_for('pause_simulation' if state.status == 'running' else 'continue_simulation', tracking=shipment.tracking) }}" class="inline">
+                                            <button type="submit" class="text-sm text-white bg-{{ 'red' if state.status == 'running' else 'green' }}-600 py-1 px-2 rounded hover:bg-{{ 'red' if state.status == 'running' else 'green' }}-700">
+                                                {{ 'Pause' if state.status == 'running' else 'Continue' }} Simulation
+                                            </button>
                                         </form>
-                                        {% elif state.status == 'paused' %}
-                                        <form method="POST" action="{{ url_for('continue_simulation', tracking=state.tracking) }}" class="inline">
-                                            <button type="submit" class="bg-green-500 text-white font-semibold py-1 px-3 rounded hover:bg-green-600">Continue</button>
-                                        </form>
-                                        {% endif %}
-                                    </td>
-                                </tr>
+                                    {% endif %}
                                 {% endfor %}
-                            </tbody>
-                        </table>
-                    </div>
-                    {% else %}
-                    <p class="text-gray-600">No active or paused simulations.</p>
-                    {% endif %}
-                </div>
-
-                <!-- Shipments Table -->
-                <div>
-                    <h2 class="text-xl font-semibold text-gray-800 mb-4">Shipments</h2>
-                    {% if shipments %}
-                    <div class="overflow-x-auto">
-                        <table class="min-w-full bg-white border">
-                            <thead>
-                                <tr>
-                                    <th class="py-2 px-4 border-b text-left text-gray-700">Tracking</th>
-                                    <th class="py-2 px-4 border-b text-left text-gray-700">Title</th>
-                                    <th class="py-2 px-4 border-b text-left text-gray-700">Origin</th>
-                                    <th class="py-2 px-4 border-b text-left text-gray-700">Destination</th>
-                                    <th class="py-2 px-4 border-b text-left text-gray-700">Status</th>
-                                    <th class="py-2 px-4 border-b text-left text-gray-700">Distance (km)</th>
-                                    <th class="py-2 px-4 border-b text-left text-gray-700">ETA</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {% for shipment in shipments %}
-                                <tr>
-                                    <td class="py-2 px-4 border-b">
-                                        <a href="{{ url_for('track', tracking=shipment.tracking) }}" class="text-blue-600 hover:underline">{{ shipment.tracking }}</a>
-                                    </td>
-                                    <td class="py-2 px-4 border-b">{{ shipment.title }}</td>
-                                    <td class="py-2 px-4 border-b">{{ shipment.origin_address or (shipment.origin_lat ~ ', ' ~ shipment.origin_lng) }}</td>
-                                    <td class="py-2 px-4 border-b">{{ shipment.dest_address or (shipment.dest_lat ~ ', ' ~ shipment.dest_lng) }}</td>
-                                    <td class="py-2 px-4 border-b">{{ shipment.status }}</td>
-                                    <td class="py-2 px-4 border-b">{{ shipment.distance_km | round(2) }}</td>
-                                    <td class="py-2 px-4 border-b">{{ shipment.eta or 'N/A' }}</td>
-                                </tr>
-                                {% endfor %}
-                            </tbody>
-                        </table>
-                    </div>
-                    {% else %}
-                    <p class="text-gray-600">No shipments found.</p>
-                    {% endif %}
-                </div>
-            </div>
-            <div class="bg-gray-200 text-gray-600 text-center py-4 text-sm">
-                <p>&copy; {{ 'now' | datetimefilter('YYYY') }} Courier Tracking Service. All rights reserved.</p>
-            </div>
+                            {% endif %}
+                        </li>
+                    {% endfor %}
+                </ul>
+            {% else %}
+                <p>No shipments found.</p>
+            {% endif %}
         </div>
     </div>
 </body>
