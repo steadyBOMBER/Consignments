@@ -1,4 +1,3 @@
-```python
 import os
 import logging
 import smtplib
@@ -1459,13 +1458,4 @@ def telegram_webhook(token):
                         send_message(f"🚚 Shipment {tracking} created! Distance: {shipment.distance_km:.2f}km, ETA: {shipment.eta}", reply_markup=get_navigation_keyboard(tracking))
                         session.pop('state', None)
                         admin_sessions[chat_id] = session
-                        return jsonify({'message': 'Shipment created'})
-                    except ValidationError as e:
-                        logger.error(f"📝 Validation error for /create: {e}")
-                        send_message(f"Validation error: {str(e)} 😿", reply_markup=get_navigation_keyboard())
-                        session.pop('state', None)
-                        admin_sessions[chat_id] = session
-                        return jsonify({'error': str(e)}), 400
-                    except IntegrityError:
-                        db.session.rollback()
-                        logger.error
+                        return
