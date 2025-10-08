@@ -6,7 +6,7 @@ import json
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, render_template, current_app, redirect, url_for
+from flask import Flask, request, jsonify, render_template, redirect, url_for
 from flask_jwt_extended import JWTManager, jwt_required, create_access_token
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -16,7 +16,7 @@ from flask_socketio import SocketIO, emit, join_room
 from flask_caching import Cache
 from pydantic import BaseModel, validator, ValidationError
 from typing import Optional as TypingOptional, Dict, List, Union
-from celery import Celery, shared_task
+from celery import Celery
 from retry import retry
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from werkzeug.security import check_password_hash
@@ -24,7 +24,6 @@ from werkzeug.exceptions import HTTPException
 import requests
 from environs import Env
 from math import radians, sin, cos, sqrt, atan2
-from twilio.rest import Client
 
 # Environment validation
 env = Env()
@@ -32,15 +31,11 @@ env.read_env()
 
 required_vars = [
     'DATABASE_URL', 'REDIS_URL', 'TELEGRAM_TOKEN', 'ADMIN_PASSWORD_HASH',
-    'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM', 'APP_BASE_URL'
+    'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM', 'APP_BASE_URL', 'SECRET_KEY'
 ]
 for var in required_vars:
     if not env(var):
         raise ValueError(f"Missing required environment variable: {var}")
-
-TWILIO_ACCOUNT_SID = env('TWILIO_ACCOUNT_SID', None)
-TWILIO_AUTH_TOKEN = env('TWILIO_AUTH_TOKEN', None)
-TWILIO_PHONE_NUMBER = env('TWILIO_PHONE_NUMBER', None)
 
 # Logging configuration
 logging.basicConfig(
@@ -59,15 +54,8 @@ app.config.from_prefixed_env()
 app.config['SQLALCHEMY_DATABASE_URI'] = env('DATABASE_URL').replace('postgresql://', 'postgresql+psycopg://')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['RATELIMIT_STORAGE_URL'] = env('REDIS_URL')
-app.config['ADMIN_PASSWORD_HASH'] = env('ADMIN_PASSWORD_HASH')
-app.config['TELEGRAM_TOKEN'] = env('TELEGRAM_TOKEN')
-app.config['SMTP_HOST'] = env('SMTP_HOST')
-app.config['SMTP_PORT'] = env.int('SMTP_PORT')
-app.config['SMTP_USER'] = env('SMTP_USER')
-app.config['SMTP_PASS'] = env('SMTP_PASS')
-app.config['SMTP_FROM'] = env('SMTP_FROM')
-app.config['APP_BASE_URL'] = env('APP_BASE_URL')
-app.config['SECRET_KEY'] = env.str('SECRET_KEY', default=os.urandom(24))
+app.config['CACHE_REDIS_URL'] = env('REDIS_URL')
+app.config['SECRET_KEY'] = env('SECRET_KEY')
 
 socketio = SocketIO(app, async_mode='threading')
 jwt = JWTManager(app)
@@ -75,17 +63,15 @@ limiter = Limiter(
     app=app,
     key_func=get_remote_address,
     storage_uri="memory://",
-    storage_options={},
     default_limits=["200 per day", "50 per hour"]
 )
-limiter.init_app(app)
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
 cache = Cache(app, config={'CACHE_TYPE': 'redis', 'CACHE_REDIS_URL': env('REDIS_URL')})
 celery = Celery(app.name, broker=env('REDIS_URL'), backend=env('REDIS_URL'))
 celery.conf.update(app.config)
 
-# Anti-Crash: Global exception handlers
+# Global exception handlers
 @app.errorhandler(Exception)
 def handle_unhandled_exception(e):
     logger.error(f"Unhandled exception: {str(e)}", exc_info=True)
@@ -95,11 +81,6 @@ def handle_unhandled_exception(e):
 def handle_http_exception(e):
     logger.warning(f"HTTP exception: {e.code} - {str(e)}")
     return render_template('error.html', error=f"{e.code} - {e.name}: {e.description}"), e.code
-
-@app.errorhandler(500)
-def internal_error(error):
-    logger.error(f"500 Internal Server Error: {str(error)}", exc_info=True)
-    return render_template('error.html', error='Internal server error'), 500
 
 # Haversine formula for distance calculation
 def haversine(lat1, lon1, lat2, lon2):
@@ -178,7 +159,7 @@ def calculate_speed(distance_km, is_urban=False):
     return base_speed
 
 # Async email task
-@shared_task(bind=True, max_retries=3, retry_backoff=2, retry_jitter=True)
+@celery.task(bind=True, max_retries=3, retry_backoff=2, retry_jitter=True)
 def send_checkpoint_email_async(self, shipment: dict, checkpoint: dict, email: str):
     try:
         utc_time = datetime.fromisoformat(checkpoint['timestamp'].replace('Z', '+00:00'))
@@ -252,33 +233,17 @@ Unsubscribe: {current_app.config['APP_BASE_URL']}/unsubscribe/{shipment['trackin
                 logger.info(f"Sent email to {email} for checkpoint {checkpoint['id']} of shipment {shipment['tracking']}")
         send_email()
     except smtplib.SMTPAuthenticationError:
-        logger.error(f"Authentication error sending email to {email} for checkpoint {checkpoint['id']}: SMTP credentials invalid")
+        logger.error(f"SMTP authentication error for {email}, checkpoint {checkpoint['id']}")
         raise self.retry(exc=Exception("SMTP authentication failed"))
     except smtplib.SMTPConnectError:
-        logger.error(f"Connection error sending email to {email} for checkpoint {checkpoint['id']}: SMTP server unreachable")
+        logger.error(f"SMTP connection error for {email}, checkpoint {checkpoint['id']}")
         raise self.retry(exc=Exception("SMTP server unreachable"))
     except smtplib.SMTPException as e:
-        logger.error(f"SMTP error sending email to {email} for checkpoint {checkpoint['id']}: {e}")
+        logger.error(f"SMTP error for {email}, checkpoint {checkpoint['id']}: {e}")
         raise self.retry(exc=e)
     except Exception as e:
-        logger.error(f"Unexpected error sending email to {email} for checkpoint {checkpoint['id']}: {e}")
+        logger.error(f"Unexpected email error for {email}, checkpoint {checkpoint['id']}: {e}")
         raise
-
-# Celery task for SMS
-@celery.task
-def send_checkpoint_sms_async(shipment_dict, checkpoint_dict, phone):
-    if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_PHONE_NUMBER):
-        return
-    try:
-        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        message = client.messages.create(
-            body=f"Update for {shipment_dict['tracking']}: {checkpoint_dict['label']} at {checkpoint_dict['timestamp']}",
-            from_=TWILIO_PHONE_NUMBER,
-            to=phone
-        )
-        logger.info(f"Sent SMS to {phone} for checkpoint {checkpoint_dict['id']} of shipment {shipment_dict['tracking']}")
-    except Exception as e:
-        logger.error(f"Failed to send SMS to {phone}: {e}")
 
 # Pydantic models
 class Coordinate(BaseModel):
@@ -437,34 +402,28 @@ class SimulationState(db.Model):
             'step_hours': self.step_hours
         }
 
-# Admin dashboard route with HTML forms
+# Admin dashboard route
 @app.route('/admin', methods=['GET', 'POST'])
 @jwt_required()
 def admin():
     try:
         shipments = Shipment.query.all()
         simulation_states = SimulationState.query.all()
-
         if request.method == 'POST':
             form_type = request.form.get('form_type')
-            
             if form_type == 'shipment':
                 tracking = request.form.get('tracking')
                 title = request.form.get('title', 'Consignment')
                 origin = request.form.get('origin')
                 destination = request.form.get('destination')
                 status = request.form.get('status')
-                
                 if not tracking or not origin or not destination or not status:
                     return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Missing required fields'), 400
-                
                 if len(tracking) > 50 or len(title) > 100:
                     return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Tracking or title too long'), 400
-                
                 valid_statuses = ['Created', 'In Transit', 'Out for Delivery', 'Delivered']
                 if status not in valid_statuses:
                     return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Invalid status'), 400
-
                 data = {
                     'tracking_number': tracking,
                     'title': title,
@@ -517,10 +476,6 @@ def admin():
                     db.session.rollback()
                     logger.error(f"Database error: {e}")
                     return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Database error'), 500
-                except Exception as e:
-                    logger.error(f"Shipment creation error: {e}")
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Failed to create shipment'), 500
-
             elif form_type == 'checkpoint':
                 tracking = request.form.get('tracking')
                 location = request.form.get('location')
@@ -528,21 +483,16 @@ def admin():
                 note = request.form.get('note')
                 status = request.form.get('status')
                 proof_photo = request.form.get('proof_photo')
-
                 if not tracking or not location or not label:
                     return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Missing required fields'), 400
-                
                 if len(tracking) > 50 or len(label) > 100 or (note and len(note) > 500) or (proof_photo and len(proof_photo) > 500):
                     return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Input too long'), 400
-
                 valid_statuses = ['', 'Created', 'In Transit', 'Out for Delivery', 'Delivered']
                 if status and status not in valid_statuses:
                     return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Invalid status'), 400
-
                 shipment = Shipment.query.filter_by(tracking=tracking).first()
                 if not shipment:
                     return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Shipment not found'), 404
-                
                 data = {
                     'address': location if ',' not in location else None,
                     'lat': float(location.split(',')[0]) if ',' in location and all(x.replace('.', '').isdigit() for x in location.split(',')) else None,
@@ -582,8 +532,6 @@ def admin():
                     for subscriber in shipment.subscribers:
                         if subscriber.is_active:
                             send_checkpoint_email_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.email)
-                            if subscriber.phone:
-                                send_checkpoint_sms_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.phone)
                     return redirect(url_for('admin'))
                 except ValidationError as e:
                     return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error=str(e)), 400
@@ -593,18 +541,12 @@ def admin():
                     db.session.rollback()
                     logger.error(f"Database error: {e}")
                     return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Database error'), 500
-                except Exception as e:
-                    logger.error(f"Checkpoint creation error for {tracking}: {e}")
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Failed to add checkpoint'), 500
-
             elif form_type == 'simulation':
                 tracking = request.form.get('tracking')
                 num_points = request.form.get('num_points')
                 step_hours = request.form.get('step_hours')
-
                 if not tracking or not num_points or not step_hours:
                     return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Missing required fields'), 400
-                
                 try:
                     num_points = int(num_points)
                     step_hours = int(step_hours)
@@ -612,7 +554,6 @@ def admin():
                         return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Number of points must be 2-10, step hours must be 1-24'), 400
                 except ValueError:
                     return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Invalid number format'), 400
-
                 shipment = Shipment.query.filter_by(tracking=tracking).first()
                 if not shipment:
                     return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Shipment not found'), 404
@@ -630,25 +571,17 @@ def admin():
                     db.session.rollback()
                     logger.error(f"Simulation error: {e}")
                     return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Database error'), 500
-                except Exception as e:
-                    logger.error(f"Simulation error for {tracking}: {e}")
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Failed to start simulation'), 500
-
             elif form_type == 'subscribe':
                 tracking = request.form.get('tracking')
                 email = request.form.get('email')
                 phone = request.form.get('phone')
-
                 if not tracking or (not email and not phone):
                     return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Tracking number and either email or phone required'), 400
-                
                 if len(tracking) > 50 or (email and len(email) > 120) or (phone and len(phone) > 20):
                     return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Input too long'), 400
-
                 shipment = Shipment.query.filter_by(tracking=tracking).first()
                 if not shipment:
                     return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Shipment not found'), 404
-                
                 try:
                     subscriber = Subscriber(shipment_id=shipment.id, email=email or '', phone=phone or None)
                     db.session.add(subscriber)
@@ -661,19 +594,13 @@ def admin():
                     db.session.rollback()
                     logger.error(f"Database error: {e}")
                     return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Database error'), 500
-                except Exception as e:
-                    logger.error(f"Subscription error for {tracking}: {e}")
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Failed to subscribe'), 500
-
             elif form_type == 'track_multiple':
                 tracking_numbers = request.form.get('tracking_numbers')
                 if not tracking_numbers:
                     return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='At least one tracking number required'), 400
-                
                 tracking_list = [tn.strip() for tn in tracking_numbers.split(',') if tn.strip()]
                 if not tracking_list:
                     return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='No valid tracking numbers provided'), 400
-                
                 try:
                     tracked_shipments = []
                     for tn in tracking_list:
@@ -686,10 +613,6 @@ def admin():
                 except SQLAlchemyError as e:
                     logger.error(f"Track multiple error: {e}")
                     return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Database error'), 500
-                except Exception as e:
-                    logger.error(f"Track multiple error: {e}")
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Failed to track shipments'), 500
-
         return render_template('admin.html', shipments=shipments, simulation_states=simulation_states)
     except Exception as e:
         logger.error(f"Admin dashboard error: {e}")
@@ -701,7 +624,6 @@ def run_simulation(shipment, num_points, step_hours, simulation_state=None):
         position = db.session.query(db.func.max(Checkpoint.position)).filter_by(shipment_id=shipment.id).scalar() or 0
         status_sequence = ['Created', 'At Warehouse', 'In Transit', 'At Sorting Facility', 'Out for Delivery', 'Delivered']
         max_status_index = len(status_sequence) - 1
-
         if simulation_state and simulation_state.status == 'paused':
             waypoints = json.loads(simulation_state.waypoints)
             current_time = simulation_state.current_time
@@ -726,7 +648,6 @@ def run_simulation(shipment, num_points, step_hours, simulation_state=None):
             )
             db.session.add(simulation_state)
             db.session.commit()
-
         total_distance = haversine(shipment.origin_lat, shipment.origin_lng, shipment.dest_lat, shipment.dest_lng)
         for i, (lat, lng) in enumerate(waypoints[start_position:], start_position + 1):
             prev_lat = shipment.origin_lat if i == 1 else waypoints[i-2][0]
@@ -766,8 +687,6 @@ def run_simulation(shipment, num_points, step_hours, simulation_state=None):
             for subscriber in shipment.subscribers:
                 if subscriber.is_active:
                     send_checkpoint_email_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.email)
-                    if subscriber.phone:
-                        send_checkpoint_sms_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.phone)
             db.session.refresh(simulation_state)
             if simulation_state.status == 'paused':
                 logger.info(f"Simulation paused for {shipment.tracking} at position {i}")
@@ -800,9 +719,6 @@ def pause_simulation(tracking):
         db.session.rollback()
         logger.error(f"Pause simulation error: {e}")
         return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Database error'), 500
-    except Exception as e:
-        logger.error(f"Pause simulation error for {tracking}: {e}")
-        return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Failed to pause simulation'), 500
 
 # Continue simulation route
 @app.route('/continue_simulation/<tracking>', methods=['POST'])
@@ -823,9 +739,6 @@ def continue_simulation(tracking):
         db.session.rollback()
         logger.error(f"Continue simulation error: {e}")
         return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Database error'), 500
-    except Exception as e:
-        logger.error(f"Continue simulation error for {tracking}: {e}")
-        return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Failed to continue simulation'), 500
 
 # Keep-Alive / Ping endpoint
 @app.route('/ping', methods=['GET'])
@@ -854,28 +767,20 @@ def health():
     except SQLAlchemyError as e:
         logger.error(f"Health check failed: {e}")
         return jsonify({'status': 'unhealthy', 'database': 'disconnected'}), 500
-    except Exception as e:
-        logger.error(f"Health check exception: {e}")
-        return jsonify({'status': 'unhealthy'}), 500
 
 # Routes
-from flask import Flask, request, render_template, redirect, url_for
-from flask_jwt_extended import create_access_token
-
-app = Flask(__name__)
-
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
         data = request.form
-        if data.get('password') == current_app.config.get('ADMIN_PASSWORD'):
+        if data.get('password') and check_password_hash(current_app.config.get('ADMIN_PASSWORD_HASH'), data.get('password')):
             access_token = create_access_token(identity='admin')
             response = redirect(url_for('admin'))
             response.set_cookie('access_token', access_token, httponly=True)
             return response
         return render_template('error.html', error='Invalid password'), 401
     return render_template('login.html')
-    
+
 @app.route('/track', methods=['GET'])
 def track_redirect():
     try:
@@ -936,7 +841,6 @@ def handle_subscribe(tracking):
         logger.error(f"WebSocket subscribe error for {tracking}: {e}")
         emit('error', {'message': 'Failed to subscribe'})
 
-# New HTML-based routes replacing Flask-RESTx
 @app.route('/shipments', methods=['GET'])
 @jwt_required()
 def list_shipments():
@@ -978,11 +882,8 @@ def subscribe(tracking):
         db.session.rollback()
         logger.error(f"Database error: {e}")
         return render_template('error.html', error='Database error'), 500
-    except Exception as e:
-        logger.error(f"Subscription error for {tracking}: {e}")
-        return render_template('error.html', error='Failed to subscribe'), 500
 
-# Telegram webhook with enhanced logging
+# Telegram webhook
 @app.route('/telegram/webhook/<token>', methods=['POST'])
 def telegram_webhook(token):
     logger.info(f"Webhook called with token: {token}")
@@ -990,8 +891,8 @@ def telegram_webhook(token):
         logger.warning(f"Invalid token: {token}")
         return jsonify({'error': 'Invalid token'}), 403
     try:
-        update = request.get_json(force=True)
-        logger.info(f"Received update: {update}")
+        update = request.get_json(force=True) or {}
+        logger.info(f"Received update: {json.dumps(update, indent=2)}")
         message = update.get('message', {})
         chat_id = message.get('chat', {}).get('id')
         text = message.get('text', '')
@@ -1005,11 +906,13 @@ def telegram_webhook(token):
                 payload = {'chat_id': chat_id, 'text': text}
                 if reply_markup:
                     payload['reply_markup'] = reply_markup
-                requests.post(
+                response = requests.post(
                     f"https://api.telegram.org/bot{app.config['TELEGRAM_TOKEN']}/sendMessage",
                     json=payload,
                     timeout=5
                 )
+                response.raise_for_status()
+                logger.info(f"Sent message to chat {chat_id}: {text}")
             except requests.RequestException as e:
                 logger.error(f"Telegram send message error: {e}")
 
@@ -1085,7 +988,7 @@ def telegram_webhook(token):
                 return jsonify({'error': 'Duplicate tracking number'}), 409
             except SQLAlchemyError as e:
                 db.session.rollback()
-                logger.error(f"Database error: {e}")
+                logger.error(f"Database error in /create: {e}")
                 send_message("Database error.", reply_markup=get_navigation_keyboard())
                 return jsonify({'error': 'Database error'}), 500
 
@@ -1137,8 +1040,6 @@ def telegram_webhook(token):
                 for subscriber in shipment.subscribers:
                     if subscriber.is_active:
                         send_checkpoint_email_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.email)
-                        if subscriber.phone:
-                            send_checkpoint_sms_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.phone)
                 send_message(f"Checkpoint added to {tracking}", reply_markup=get_navigation_keyboard(tracking))
                 return jsonify({'message': 'OK'})
             except ValidationError as e:
@@ -1146,7 +1047,7 @@ def telegram_webhook(token):
                 return jsonify({'error': str(e)}), 400
             except SQLAlchemyError as e:
                 db.session.rollback()
-                logger.error(f"Database error: {e}")
+                logger.error(f"Database error in /addcp: {e}")
                 send_message("Database error.", reply_markup=get_navigation_keyboard())
                 return jsonify({'error': 'Database error'}), 500
 
@@ -1179,7 +1080,7 @@ def telegram_webhook(token):
                 return jsonify({'error': str(e)}), 400
             except SQLAlchemyError as e:
                 db.session.rollback()
-                logger.error(f"Database error: {e}")
+                logger.error(f"Database error in /simulate: {e}")
                 send_message("Database error.", reply_markup=get_navigation_keyboard())
                 return jsonify({'error': 'Database error'}), 500
 
