@@ -1,10 +1,13 @@
+# --- Imports ---
 import os
 import logging
 import smtplib
 import random
 import json
-from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, render_template, current_app, redirect, url_for
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from datetime import timedelta, datetime
+from flask import Flask, request, jsonify, render_template, redirect, url_for, current_app
 from flask_wtf import FlaskForm
 from wtforms import StringField, SubmitField, TextAreaField, IntegerField
 from wtforms.validators import DataRequired, Optional, NumberRange
@@ -27,7 +30,7 @@ from environs import Env
 from math import radians, sin, cos, sqrt, atan2
 from twilio.rest import Client
 
-# Environment validation
+# --- Environment Validation ---
 env = Env()
 env.read_env()
 
@@ -43,7 +46,7 @@ TWILIO_ACCOUNT_SID = env('TWILIO_ACCOUNT_SID', None)
 TWILIO_AUTH_TOKEN = env('TWILIO_AUTH_TOKEN', None)
 TWILIO_PHONE_NUMBER = env('TWILIO_PHONE_NUMBER', None)
 
-# Logging configuration
+# --- Logging Configuration ---
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -54,7 +57,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Flask app setup
+# --- Flask App Setup ---
 app = Flask(__name__)
 app.config.from_prefixed_env()
 app.config['SQLALCHEMY_DATABASE_URI'] = env('DATABASE_URL').replace('postgresql://', 'postgresql+psycopg://')
@@ -78,17 +81,13 @@ limiter = Limiter(
     storage_uri=env('REDIS_URL'),
     default_limits=["200 per day", "50 per hour"]
 )
-limiter.init_app(app)
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
 cache = Cache(app, config={'CACHE_TYPE': 'redis', 'CACHE_REDIS_URL': env('REDIS_URL')})
 celery = Celery(app.name, broker=env('REDIS_URL'), backend=env('REDIS_URL'))
 celery.conf.update(app.config)
 
-# Admin sessions for Telegram authentication
-admin_sessions = {}
-
-# WTForms for admin dashboard
+# --- Forms (Flask-WTF) ---
 class ShipmentForm(FlaskForm):
     tracking = StringField('Tracking Number', validators=[DataRequired()])
     title = StringField('Title', default='Consignment')
@@ -120,101 +119,9 @@ class SubscribeForm(FlaskForm):
 
 class TrackMultipleForm(FlaskForm):
     tracking_numbers = TextAreaField('Tracking Numbers (comma-separated)', validators=[DataRequired()])
-    submit = SubmitField('Track')
+    submit = SubmitField('Track Shipments')
 
-# Anti-Crash: Global exception handlers
-@app.errorhandler(Exception)
-def handle_unhandled_exception(e):
-    logger.error(f"Unhandled exception: {str(e)}", exc_info=True)
-    return render_template('error.html', error='Internal server error'), 500
-
-@app.errorhandler(HTTPException)
-def handle_http_exception(e):
-    logger.warning(f"HTTP exception: {e.code} - {str(e)}")
-    return render_template('error.html', error=f"{e.code} - {e.name}: {e.description}"), e.code
-
-@app.errorhandler(500)
-def internal_error(error):
-    logger.error(f"500 Internal Server Error: {str(error)}", exc_info=True)
-    return render_template('error.html', error='Internal server error'), 500
-
-# Haversine formula for distance calculation
-def haversine(lat1, lon1, lat2, lon2):
-    R = 6371  # Earth radius in km
-    dlat = radians(lat2 - lat1)
-    dlon = radians(lon2 - lon1)
-    a = sin(dlat / 2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2)**2
-    c = 2 * atan2(sqrt(a), sqrt(1 - a))
-    distance = R * c
-    return distance
-
-def calculate_eta(distance_km, speed_kmh=50):
-    return timedelta(hours=distance_km / speed_kmh)
-
-# Reverse geocoding for stop naming
-@cache.memoize(timeout=86400)
-def reverse_geocode(lat: float, lng: float) -> str:
-    try:
-        response = requests.get(
-            "https://nominatim.openstreetmap.org/reverse",
-            params={"lat": lat, "lon": lng, "format": "json"},
-            headers={"User-Agent": "CourierTrackingApp/1.0 (contact@yourdomain.com)"},
-            timeout=5
-        )
-        response.raise_for_status()
-        data = response.json()
-        return data.get('display_name', f"Location at {lat:.4f}, {lng:.4f}")
-    except requests.RequestException as e:
-        logger.error(f"Reverse geocoding error: {e}")
-        return f"Location at {lat:.4f}, {lng:.4f}"
-
-# Geocoding function using Nominatim
-@cache.memoize(timeout=86400)
-def geocode_address(address: str) -> Dict[str, float]:
-    try:
-        response = requests.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={"q": address, "format": "json", "limit": 1},
-            headers={"User-Agent": "CourierTrackingApp/1.0 (contact@yourdomain.com)"},
-            timeout=5
-        )
-        response.raise_for_status()
-        data = response.json()
-        if not data:
-            raise ValueError(f"Geocoding failed for address: {address}")
-        location = data[0]
-        return {"lat": float(location['lat']), "lng": float(location['lon'])}
-    except requests.RequestException as e:
-        logger.error(f"Nominatim geocoding error: {e}")
-        raise ValueError(f"Failed to geocode address: {address}")
-
-# Helper function to generate realistic waypoints
-def generate_waypoints(origin_lat, origin_lng, dest_lat, dest_lng, num_points):
-    waypoints = []
-    total_distance = haversine(origin_lat, origin_lng, dest_lat, dest_lng)
-    num_stops = min(max(1, int(total_distance // 200)), 3)
-    if num_points < num_stops + 2:
-        num_points = num_stops + 2
-    for i in range(num_points):
-        fraction = i / (num_points - 1)
-        lat = origin_lat + (dest_lat - origin_lat) * fraction + random.uniform(-0.05, 0.05)
-        lng = origin_lng + (dest_lng - origin_lng) * fraction + random.uniform(-0.05, 0.05)
-        lat = max(min(lat, 90), -90)
-        lng = max(min(lng, 180), -180)
-        waypoints.append((lat, lng))
-    return waypoints
-
-# Helper function to calculate variable speed
-def calculate_speed(distance_km, is_urban=False):
-    if distance_km > 100:
-        base_speed = random.uniform(60, 100)
-    else:
-        base_speed = random.uniform(30, 60)
-    if is_urban:
-        base_speed *= random.uniform(0.7, 0.9)
-    return base_speed
-
-# Async email task
+# --- Celery Tasks ---
 @shared_task(bind=True, max_retries=3, retry_backoff=2, retry_jitter=True)
 def send_checkpoint_email_async(self, shipment: dict, checkpoint: dict, email: str):
     try:
@@ -321,11 +228,13 @@ def send_checkpoint_sms_async(shipment_dict, checkpoint_dict, phone):
 class Coordinate(BaseModel):
     lat: float
     lng: float
+
     @validator('lat')
     def check_lat(cls, v):
         if not -90 <= v <= 90:
             raise ValueError('Latitude must be between -90 and 90')
         return v
+
     @validator('lng')
     def check_lng(cls, v):
         if not -180 <= v <= 180:
@@ -340,11 +249,13 @@ class CheckpointCreate(BaseModel):
     note: TypingOptional[str] = None
     status: TypingOptional[str] = None
     proof_photo: TypingOptional[str] = None
+
     @validator('label')
     def check_label(cls, v):
         if not v.strip():
             raise ValueError('Label cannot be empty')
         return v
+
     @validator('address', always=True)
     def check_coordinates_or_address(cls, v, values):
         if not v and (values.get('lat') is None or values.get('lng') is None):
@@ -359,11 +270,13 @@ class ShipmentCreate(BaseModel):
     origin: Union[Dict[str, float], str]
     destination: Union[Dict[str, float], str]
     status: str = "Created"
+
     @validator('tracking_number')
     def check_tracking_number(cls, v):
         if not v.strip():
             raise ValueError('Tracking number cannot be empty')
         return v
+
     @validator('origin', 'destination')
     def check_coordinates_or_address(cls, v):
         if isinstance(v, dict):
@@ -380,6 +293,7 @@ class StatusHistory(db.Model):
     shipment_id = db.Column(db.Integer, db.ForeignKey('shipment.id'), nullable=False)
     status = db.Column(db.String(50), nullable=False)
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+
     def to_dict(self):
         return {
             'status': self.status,
@@ -404,9 +318,11 @@ class Shipment(db.Model):
     subscribers = db.relationship('Subscriber', backref='shipment', lazy=True)
     history = db.relationship('StatusHistory', backref='shipment', lazy=True)
     simulation_state = db.relationship('SimulationState', backref='shipment', uselist=False, lazy=True)
+
     def calculate_distance_and_eta(self):
         self.distance_km = haversine(self.origin_lat, self.origin_lng, self.dest_lat, self.dest_lng)
         self.eta = datetime.utcnow() + calculate_eta(self.distance_km)
+
     def to_dict(self):
         return {
             'id': self.id,
@@ -432,6 +348,7 @@ class Checkpoint(db.Model):
     status = db.Column(db.String(50), nullable=True)
     proof_photo = db.Column(db.String(500), nullable=True)
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+
     def to_dict(self):
         return {
             'id': self.id,
@@ -463,6 +380,7 @@ class SimulationState(db.Model):
     current_time = db.Column(db.DateTime, nullable=False, default=datetime.utcnow)
     num_points = db.Column(db.Integer, nullable=False)
     step_hours = db.Column(db.Integer, nullable=False)
+
     def to_dict(self):
         return {
             'tracking': self.tracking,
@@ -481,94 +399,113 @@ def admin():
     try:
         shipments = Shipment.query.all()
         simulation_states = SimulationState.query.all()
-        shipment_form = ShipmentForm()
-        checkpoint_form = CheckpointForm()
-        simulation_form = SimulationForm()
-        subscribe_form = SubscribeForm()
-        track_multiple_form = TrackMultipleForm()
 
         if request.method == 'POST':
-            if shipment_form.validate_on_submit() and shipment_form.submit.data:
+            form_type = request.form.get('form_type')
+            
+            if form_type == 'shipment':
+                tracking = request.form.get('tracking')
+                title = request.form.get('title', 'Consignment')
+                origin = request.form.get('origin')
+                destination = request.form.get('destination')
+                status = request.form.get('status')
+                
+                if not tracking or not origin or not destination or not status:
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Missing required fields'), 400
+                
+                if len(tracking) > 50 or len(title) > 100:
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Tracking or title too long'), 400
+                
+                valid_statuses = ['Created', 'In Transit', 'Out for Delivery', 'Delivered']
+                if status not in valid_statuses:
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Invalid status'), 400
+
                 data = {
-                    'tracking_number': shipment_form.tracking.data,
-                    'title': shipment_form.title.data,
-                    'origin': shipment_form.origin.data,
-                    'destination': shipment_form.destination.data,
-                    'status': shipment_form.status.data
+                    'tracking_number': tracking,
+                    'title': title,
+                    'origin': origin,
+                    'destination': destination,
+                    'status': status
                 }
                 try:
                     ShipmentCreate(**data)
-                    if ',' in shipment_form.origin.data and all(x.replace('.', '').isdigit() for x in shipment_form.origin.data.split(',')):
-                        origin_lat, origin_lng = map(float, shipment_form.origin.data.split(','))
+                    if ',' in origin and all(x.replace('.', '').isdigit() for x in origin.split(',')):
+                        origin_lat, origin_lng = map(float, origin.split(','))
                         origin_address = None
                     else:
-                        coords = geocode_address(shipment_form.origin.data)
+                        coords = geocode_address(origin)
                         origin_lat, origin_lng = coords['lat'], coords['lng']
-                        origin_address = shipment_form.origin.data
-                    if ',' in shipment_form.destination.data and all(x.replace('.', '').isdigit() for x in shipment_form.destination.data.split(',')):
-                        dest_lat, dest_lng = map(float, shipment_form.destination.data.split(','))
+                        origin_address = origin
+                    if ',' in destination and all(x.replace('.', '').isdigit() for x in destination.split(',')):
+                        dest_lat, dest_lng = map(float, destination.split(','))
                         dest_address = None
                     else:
-                        coords = geocode_address(shipment_form.destination.data)
+                        coords = geocode_address(destination)
                         dest_lat, dest_lng = coords['lat'], coords['lng']
-                        dest_address = shipment_form.destination.data
+                        dest_address = destination
                     shipment = Shipment(
-                        tracking=shipment_form.tracking.data,
-                        title=shipment_form.title.data,
+                        tracking=tracking,
+                        title=title,
                         origin_lat=origin_lat,
                         origin_lng=origin_lng,
                         dest_lat=dest_lat,
                         dest_lng=dest_lng,
                         origin_address=origin_address,
                         dest_address=dest_address,
-                        status=shipment_form.status.data
+                        status=status
                     )
                     shipment.calculate_distance_and_eta()
                     db.session.add(shipment)
-                    status_history = StatusHistory(shipment=shipment, status=shipment_form.status.data)
+                    status_history = StatusHistory(shipment=shipment, status=status)
                     db.session.add(status_history)
                     db.session.commit()
                     socketio.emit('update', shipment.to_dict(), namespace='/', room=shipment.tracking)
                     return redirect(url_for('admin'))
                 except ValidationError as e:
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states,
-                                         shipment_form=shipment_form, checkpoint_form=checkpoint_form,
-                                         simulation_form=simulation_form, subscribe_form=subscribe_form,
-                                         track_multiple_form=track_multiple_form, error=str(e)), 400
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error=str(e)), 400
                 except ValueError as e:
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states,
-                                         shipment_form=shipment_form, checkpoint_form=checkpoint_form,
-                                         simulation_form=simulation_form, subscribe_form=subscribe_form,
-                                         track_multiple_form=track_multiple_form, error=str(e)), 400
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error=str(e)), 400
                 except IntegrityError:
                     db.session.rollback()
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states,
-                                         shipment_form=shipment_form, checkpoint_form=checkpoint_form,
-                                         simulation_form=simulation_form, subscribe_form=subscribe_form,
-                                         track_multiple_form=track_multiple_form, error='Tracking number already exists'), 409
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Tracking number already exists'), 409
                 except SQLAlchemyError as e:
                     db.session.rollback()
                     logger.error(f"Database error: {e}")
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states,
-                                         shipment_form=shipment_form, checkpoint_form=checkpoint_form,
-                                         simulation_form=simulation_form, subscribe_form=subscribe_form,
-                                         track_multiple_form=track_multiple_form, error='Database error'), 500
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Database error'), 500
+                except Exception as e:
+                    logger.error(f"Shipment creation error: {e}")
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Failed to create shipment'), 500
 
-            elif checkpoint_form.validate_on_submit() and checkpoint_form.submit.data:
-                shipment = Shipment.query.filter_by(tracking=checkpoint_form.tracking.data).first()
+            elif form_type == 'checkpoint':
+                tracking = request.form.get('tracking')
+                location = request.form.get('location')
+                label = request.form.get('label')
+                note = request.form.get('note')
+                status = request.form.get('status')
+                proof_photo = request.form.get('proof_photo')
+
+                if not tracking or not location or not label:
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Missing required fields'), 400
+                
+                if len(tracking) > 50 or len(label) > 100 or (note and len(note) > 500) or (proof_photo and len(proof_photo) > 500):
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Input too long'), 400
+
+                valid_statuses = ['', 'Created', 'In Transit', 'Out for Delivery', 'Delivered']
+                if status and status not in valid_statuses:
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Invalid status'), 400
+
+                shipment = Shipment.query.filter_by(tracking=tracking).first()
                 if not shipment:
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states,
-                                         shipment_form=shipment_form, checkpoint_form=checkpoint_form,
-                                         simulation_form=simulation_form, subscribe_form=subscribe_form,
-                                         track_multiple_form=track_multiple_form, error='Shipment not found'), 404
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Shipment not found'), 404
+                
                 data = {
-                    'address': checkpoint_form.location.data if ',' not in checkpoint_form.location.data else None,
-                    'lat': float(checkpoint_form.location.data.split(',')[0]) if ',' in checkpoint_form.location.data and all(x.replace('.', '').isdigit() for x in checkpoint_form.location.data.split(',')) else None,
-                    'lng': float(checkpoint_form.location.data.split(',')[1]) if ',' in checkpoint_form.location.data and all(x.replace('.', '').isdigit() for x in checkpoint_form.location.data.split(',')) else None,
-                    'label': checkpoint_form.label.data,
-                    'note': checkpoint_form.note.data or None,
-                    'status': checkpoint_form.status.data or None,
-                    'proof_photo': checkpoint_form.proof_photo.data or None
+                    'address': location if ',' not in location else None,
+                    'lat': float(location.split(',')[0]) if ',' in location and all(x.replace('.', '').isdigit() for x in location.split(',')) else None,
+                    'lng': float(location.split(',')[1]) if ',' in location and all(x.replace('.', '').isdigit() for x in location.split(',')) else None,
+                    'label': label,
+                    'note': note or None,
+                    'status': status or None,
+                    'proof_photo': proof_photo or None
                 }
                 try:
                     CheckpointCreate(**data)
@@ -596,7 +533,7 @@ def admin():
                         if shipment.status == 'Delivered':
                             shipment.eta = checkpoint.timestamp
                     db.session.commit()
-                    socketio.emit('update', shipment.to_dict(), namespace='/', room=shipment.tracking)
+                    socketio.emit('update', shipment.to_dict(), namespace='/', room=tracking)
                     for subscriber in shipment.subscribers:
                         if subscriber.is_active:
                             send_checkpoint_email_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.email)
@@ -604,203 +541,106 @@ def admin():
                                 send_checkpoint_sms_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.phone)
                     return redirect(url_for('admin'))
                 except ValidationError as e:
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states,
-                                         shipment_form=shipment_form, checkpoint_form=checkpoint_form,
-                                         simulation_form=simulation_form, subscribe_form=subscribe_form,
-                                         track_multiple_form=track_multiple_form, error=str(e)), 400
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error=str(e)), 400
                 except ValueError as e:
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states,
-                                         shipment_form=shipment_form, checkpoint_form=checkpoint_form,
-                                         simulation_form=simulation_form, subscribe_form=subscribe_form,
-                                         track_multiple_form=track_multiple_form, error=str(e)), 400
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error=str(e)), 400
                 except SQLAlchemyError as e:
                     db.session.rollback()
                     logger.error(f"Database error: {e}")
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states,
-                                         shipment_form=shipment_form, checkpoint_form=checkpoint_form,
-                                         simulation_form=simulation_form, subscribe_form=subscribe_form,
-                                         track_multiple_form=track_multiple_form, error='Database error'), 500
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Database error'), 500
+                except Exception as e:
+                    logger.error(f"Checkpoint creation error for {tracking}: {e}")
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Failed to add checkpoint'), 500
 
-            elif simulation_form.validate_on_submit() and simulation_form.submit.data:
-                shipment = Shipment.query.filter_by(tracking=simulation_form.tracking.data).first()
+            elif form_type == 'simulation':
+                tracking = request.form.get('tracking')
+                num_points = request.form.get('num_points')
+                step_hours = request.form.get('step_hours')
+
+                if not tracking or not num_points or not step_hours:
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Missing required fields'), 400
+                
+                try:
+                    num_points = int(num_points)
+                    step_hours = int(step_hours)
+                    if num_points < 2 or num_points > 10 or step_hours < 1 or step_hours > 24:
+                        return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Number of points must be 2-10, step hours must be 1-24'), 400
+                except ValueError:
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Invalid number format'), 400
+
+                shipment = Shipment.query.filter_by(tracking=tracking).first()
                 if not shipment:
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states,
-                                         shipment_form=shipment_form, checkpoint_form=checkpoint_form,
-                                         simulation_form=simulation_form, subscribe_form=subscribe_form,
-                                         track_multiple_form=track_multiple_form, error='Shipment not found'), 404
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Shipment not found'), 404
                 if shipment.status == 'Delivered':
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states,
-                                         shipment_form=shipment_form, checkpoint_form=checkpoint_form,
-                                         simulation_form=simulation_form, subscribe_form=subscribe_form,
-                                         track_multiple_form=track_multiple_form, error='Shipment already delivered'), 400
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Shipment already delivered'), 400
                 simulation_state = SimulationState.query.filter_by(shipment_id=shipment.id).first()
                 if simulation_state and simulation_state.status == 'running':
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states,
-                                         shipment_form=shipment_form, checkpoint_form=checkpoint_form,
-                                         simulation_form=simulation_form, subscribe_form=subscribe_form,
-                                         track_multiple_form=track_multiple_form, error='Simulation already running'), 400
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Simulation already running'), 400
                 try:
-                    run_simulation_async.delay(shipment.id, simulation_form.num_points.data, simulation_form.step_hours.data)
+                    run_simulation_async.delay(shipment.id, num_points, step_hours)
                     return redirect(url_for('admin'))
                 except Exception as e:
-                    logger.error(f"Simulation error for {simulation_form.tracking.data}: {e}")
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states,
-                                         shipment_form=shipment_form, checkpoint_form=checkpoint_form,
-                                         simulation_form=simulation_form, subscribe_form=subscribe_form,
-                                         track_multiple_form=track_multiple_form, error='Failed to start simulation'), 500
+                    logger.error(f"Simulation error for {tracking}: {e}")
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Failed to start simulation'), 500
 
-            elif subscribe_form.validate_on_submit() and subscribe_form.submit.data:
-                shipment = Shipment.query.filter_by(tracking=subscribe_form.tracking.data).first()
+            elif form_type == 'subscribe':
+                tracking = request.form.get('tracking')
+                email = request.form.get('email')
+                phone = request.form.get('phone')
+
+                if not tracking or (not email and not phone):
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Tracking number and either email or phone required'), 400
+                
+                if len(tracking) > 50 or (email and len(email) > 120) or (phone and len(phone) > 20):
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Input too long'), 400
+
+                shipment = Shipment.query.filter_by(tracking=tracking).first()
                 if not shipment:
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states,
-                                         shipment_form=shipment_form, checkpoint_form=checkpoint_form,
-                                         simulation_form=simulation_form, subscribe_form=subscribe_form,
-                                         track_multiple_form=track_multiple_form, error='Shipment not found'), 404
-                if not (subscribe_form.email.data or subscribe_form.phone.data):
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states,
-                                         shipment_form=shipment_form, checkpoint_form=checkpoint_form,
-                                         simulation_form=simulation_form, subscribe_form=subscribe_form,
-                                         track_multiple_form=track_multiple_form, error='Email or phone required'), 400
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Shipment not found'), 404
+                
                 try:
-                    subscriber = Subscriber(shipment_id=shipment.id, email=subscribe_form.email.data or '', phone=subscribe_form.phone.data or None)
+                    subscriber = Subscriber(shipment_id=shipment.id, email=email or '', phone=phone or None)
                     db.session.add(subscriber)
                     db.session.commit()
                     return redirect(url_for('admin'))
                 except IntegrityError:
                     db.session.rollback()
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states,
-                                         shipment_form=shipment_form, checkpoint_form=checkpoint_form,
-                                         simulation_form=simulation_form, subscribe_form=subscribe_form,
-                                         track_multiple_form=track_multiple_form, error='Already subscribed'), 409
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Already subscribed'), 409
                 except SQLAlchemyError as e:
                     db.session.rollback()
                     logger.error(f"Database error: {e}")
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states,
-                                         shipment_form=shipment_form, checkpoint_form=checkpoint_form,
-                                         simulation_form=simulation_form, subscribe_form=subscribe_form,
-                                         track_multiple_form=track_multiple_form, error='Database error'), 500
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Database error'), 500
+                except Exception as e:
+                    logger.error(f"Subscription error for {tracking}: {e}")
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Failed to subscribe'), 500
 
-            elif track_multiple_form.validate_on_submit() and track_multiple_form.submit.data:
-                tracking_list = [tn.strip() for tn in track_multiple_form.tracking_numbers.data.split(',') if tn.strip()]
+            elif form_type == 'track_multiple':
+                tracking_numbers = request.form.get('tracking_numbers')
+                if not tracking_numbers:
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='At least one tracking number required'), 400
+                
+                tracking_list = [tn.strip() for tn in tracking_numbers.split(',') if tn.strip()]
                 if not tracking_list:
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states,
-                                         shipment_form=shipment_form, checkpoint_form=checkpoint_form,
-                                         simulation_form=simulation_form, subscribe_form=subscribe_form,
-                                         track_multiple_form=track_multiple_form, error='No valid tracking numbers provided'), 400
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='No valid tracking numbers provided'), 400
+                
                 try:
                     tracked_shipments = []
                     for tn in tracking_list:
                         shipment = Shipment.query.filter_by(tracking=tn).first()
                         if shipment:
                             tracked_shipments.append(shipment)
-                    return render_template('track_multiple.html', tracked_shipments=tracked_shipments, error=None)
+                    return render_template('track_multiple.html', tracked_shipments=tracked_shipments)
                 except SQLAlchemyError as e:
+                    logger.error(f"Database error: {e}")
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Database error'), 500
+                except Exception as e:
                     logger.error(f"Track multiple error: {e}")
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states,
-                                         shipment_form=shipment_form, checkpoint_form=checkpoint_form,
-                                         simulation_form=simulation_form, subscribe_form=subscribe_form,
-                                         track_multiple_form=track_multiple_form, error='Database error'), 500
+                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Failed to track shipments'), 500
 
-        return render_template('admin.html', shipments=shipments, simulation_states=simulation_states,
-                             shipment_form=shipment_form, checkpoint_form=checkpoint_form,
-                             simulation_form=simulation_form, subscribe_form=subscribe_form,
-                             track_multiple_form=track_multiple_form)
+        return render_template('admin.html', shipments=shipments, simulation_states=simulation_states)
     except Exception as e:
         logger.error(f"Admin dashboard error: {e}")
         return render_template('error.html', error='Failed to load admin dashboard'), 500
-
-# Simulation logic
-@celery.task
-def run_simulation_async(shipment_id, num_points, step_hours):
-    with app.app_context():
-        try:
-            shipment = Shipment.query.get(shipment_id)
-            if not shipment:
-                logger.error(f"Shipment {shipment_id} not found for simulation")
-                return
-            simulation_state = SimulationState.query.filter_by(shipment_id=shipment.id).first()
-            position = db.session.query(db.func.max(Checkpoint.position)).filter_by(shipment_id=shipment.id).scalar() or 0
-            status_sequence = ['Created', 'At Warehouse', 'In Transit', 'At Sorting Facility', 'Out for Delivery', 'Delivered']
-            max_status_index = len(status_sequence) - 1
-
-            if simulation_state and simulation_state.status == 'paused':
-                waypoints = json.loads(simulation_state.waypoints)
-                current_time = simulation_state.current_time
-                start_position = simulation_state.current_position
-                num_points = simulation_state.num_points
-                step_hours = simulation_state.step_hours
-            else:
-                if num_points < 2 or step_hours < 1:
-                    raise ValueError("Number of points must be at least 2, step hours must be at least 1")
-                waypoints = generate_waypoints(shipment.origin_lat, shipment.origin_lng, shipment.dest_lat, shipment.dest_lng, num_points)
-                current_time = datetime.utcnow()
-                start_position = 0
-                simulation_state = SimulationState(
-                    shipment_id=shipment.id,
-                    tracking=shipment.tracking,
-                    status='running',
-                    current_position=0,
-                    waypoints=json.dumps(waypoints),
-                    current_time=current_time,
-                    num_points=num_points,
-                    step_hours=step_hours
-                )
-                db.session.add(simulation_state)
-                db.session.commit()
-
-            total_distance = haversine(shipment.origin_lat, shipment.origin_lng, shipment.dest_lat, shipment.dest_lng)
-            for i, (lat, lng) in enumerate(waypoints[start_position:], start_position + 1):
-                prev_lat = shipment.origin_lat if i == 1 else waypoints[i-2][0]
-                prev_lng = shipment.origin_lng if i == 1 else waypoints[i-2][1]
-                segment_distance = haversine(prev_lat, prev_lng, lat, lng)
-                is_urban = i == 1 or i == num_points or segment_distance < 50
-                speed = calculate_speed(segment_distance, is_urban)
-                travel_time = calculate_eta(segment_distance, speed)
-                delay = timedelta(minutes=random.uniform(0, 120))
-                current_time += travel_time + delay
-                status_index = min(i * max_status_index // num_points, max_status_index)
-                status = status_sequence[status_index] if i < num_points else 'Delivered'
-                location_name = reverse_geocode(lat, lng)
-                label = f"{status} at {location_name.split(',')[0]}"
-                note = f"Processed at {location_name}" if status in ['At Warehouse', 'At Sorting Facility'] else f"En route to {shipment.dest_address or 'destination'}"
-                checkpoint = Checkpoint(
-                    shipment_id=shipment.id,
-                    position=position + i,
-                    lat=lat,
-                    lng=lng,
-                    label=label,
-                    note=note,
-                    status=status,
-                    timestamp=current_time
-                )
-                db.session.add(checkpoint)
-                if status and status != shipment.status:
-                    shipment.status = status
-                    status_history = StatusHistory(shipment=shipment, status=status)
-                    db.session.add(status_history)
-                    if status == 'Delivered':
-                        shipment.eta = current_time
-                simulation_state.current_position = i
-                simulation_state.current_time = current_time
-                db.session.commit()
-                socketio.emit('update', shipment.to_dict(), namespace='/', room=shipment.tracking)
-                for subscriber in shipment.subscribers:
-                    if subscriber.is_active:
-                        send_checkpoint_email_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.email)
-                        if subscriber.phone:
-                            send_checkpoint_sms_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.phone)
-                db.session.refresh(simulation_state)
-                if simulation_state.status == 'paused':
-                    logger.info(f"Simulation paused for {shipment.tracking} at position {i}")
-                    break
-            else:
-                simulation_state.status = 'completed'
-                db.session.commit()
-                logger.info(f"Simulation completed for {shipment.tracking}")
-        except Exception as e:
-            db.session.rollback()
-            logger.error(f"Simulation error for {shipment.tracking}: {e}")
-            raise
 
 # Pause simulation route
 @app.route('/pause_simulation/<tracking>', methods=['POST'])
@@ -815,11 +655,10 @@ def pause_simulation(tracking):
             return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='No active simulation to pause'), 400
         simulation_state.status = 'paused'
         db.session.commit()
-        logger.info(f"Simulation paused for {tracking}")
         return redirect(url_for('admin'))
     except SQLAlchemyError as e:
         db.session.rollback()
-        logger.error(f"Pause simulation error: {e}")
+        logger.error(f"Database error: {e}")
         return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Database error'), 500
     except Exception as e:
         logger.error(f"Pause simulation error for {tracking}: {e}")
@@ -842,7 +681,7 @@ def continue_simulation(tracking):
         return redirect(url_for('admin'))
     except SQLAlchemyError as e:
         db.session.rollback()
-        logger.error(f"Continue simulation error: {e}")
+        logger.error(f"Database error: {e}")
         return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Database error'), 500
     except Exception as e:
         logger.error(f"Continue simulation error for {tracking}: {e}")
@@ -883,15 +722,15 @@ def health():
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        password = request.form.get('password')
-        if password and check_password_hash(current_app.config['ADMIN_PASSWORD_HASH'], password):
+        data = request.form
+        if data.get('password') and check_password_hash(current_app.config['ADMIN_PASSWORD_HASH'], data['password']):
             access_token = create_access_token(identity='admin')
             response = redirect(url_for('admin'))
             response.set_cookie('access_token', access_token, httponly=True)
             return response
         return render_template('error.html', error='Invalid password'), 401
     return render_template('login.html')
-
+    
 @app.route('/track', methods=['GET'])
 def track_redirect():
     try:
@@ -952,15 +791,13 @@ def handle_subscribe(tracking):
         logger.error(f"WebSocket subscribe error for {tracking}: {e}")
         emit('error', {'message': 'Failed to subscribe'})
 
+# New HTML-based routes replacing Flask-RESTx
 @app.route('/shipments', methods=['GET'])
 @jwt_required()
 def list_shipments():
     try:
         shipments = Shipment.query.all()
-        return render_template('admin.html', shipments=shipments, simulation_states=SimulationState.query.all(),
-                             shipment_form=ShipmentForm(), checkpoint_form=CheckpointForm(),
-                             simulation_form=SimulationForm(), subscribe_form=SubscribeForm(),
-                             track_multiple_form=TrackMultipleForm())
+        return render_template('admin.html', shipments=shipments, simulation_states=SimulationState.query.all())
     except Exception as e:
         logger.error(f"Shipment list error: {e}")
         return render_template('error.html', error='Failed to retrieve shipments'), 500
@@ -968,24 +805,30 @@ def list_shipments():
 @app.route('/shipments/<tracking>/subscribe', methods=['POST'])
 def subscribe(tracking):
     try:
-        form = SubscribeForm()
-        if form.validate_on_submit():
-            shipment = Shipment.query.filter_by(tracking=tracking).first()
-            if not shipment:
-                return render_template('error.html', error='Shipment not found'), 404
-            if not (form.email.data or form.phone.data):
-                return render_template('track.html', shipment=shipment, checkpoints=[], history=[],
-                                     pagination=None, error='Email or phone required'), 400
-            subscriber = Subscriber(shipment_id=shipment.id, email=form.email.data or '', phone=form.phone.data or None)
-            db.session.add(subscriber)
-            db.session.commit()
-            return redirect(url_for('track', tracking=tracking))
-        return render_template('track.html', shipment=Shipment.query.filter_by(tracking=tracking).first(),
-                             checkpoints=[], history=[], pagination=None, error='Invalid input'), 400
+        email = request.form.get('email')
+        phone = request.form.get('phone')
+        if not email and not phone:
+            return render_template('track.html', 
+                shipment=Shipment.query.filter_by(tracking=tracking).first(),
+                checkpoints=[],
+                history=[],
+                pagination=None,
+                error='Email or phone is required'), 400
+        shipment = Shipment.query.filter_by(tracking=tracking).first()
+        if not shipment:
+            return render_template('error.html', error='Shipment not found'), 404
+        subscriber = Subscriber(shipment_id=shipment.id, email=email or '', phone=phone or None)
+        db.session.add(subscriber)
+        db.session.commit()
+        return redirect(url_for('track', tracking=tracking))
     except IntegrityError:
         db.session.rollback()
-        return render_template('track.html', shipment=Shipment.query.filter_by(tracking=tracking).first(),
-                             checkpoints=[], history=[], pagination=None, error='Already subscribed'), 409
+        return render_template('track.html', 
+            shipment=Shipment.query.filter_by(tracking=tracking).first(),
+            checkpoints=[],
+            history=[],
+            pagination=None,
+            error='Already subscribed'), 409
     except SQLAlchemyError as e:
         db.session.rollback()
         logger.error(f"Database error: {e}")
@@ -994,7 +837,7 @@ def subscribe(tracking):
         logger.error(f"Subscription error for {tracking}: {e}")
         return render_template('error.html', error='Failed to subscribe'), 500
 
-# Telegram webhook with enhanced logging and authentication
+# Telegram webhook with enhanced logging
 @app.route('/telegram/webhook/<token>', methods=['POST'])
 def telegram_webhook(token):
     logger.info(f"Webhook called with token: {token}")
@@ -1039,20 +882,6 @@ def telegram_webhook(token):
 
         command, *args = text.split(' ', 1)
         args = args[0].split('|') if args else []
-
-        if command == '/admin_login' and len(args) == 1:
-            if check_password_hash(app.config['ADMIN_PASSWORD_HASH'], args[0]):
-                admin_sessions[chat_id] = {'authenticated': True, 'expires': datetime.utcnow() + timedelta(hours=1)}
-                send_message("Authenticated successfully. You can now use admin commands.", reply_markup=get_navigation_keyboard())
-                return jsonify({'message': 'OK'})
-            send_message("Invalid password.", reply_markup=get_navigation_keyboard())
-            return jsonify({'error': 'Invalid password'}), 401
-
-        if command in ['/create', '/addcp', '/simulate']:
-            session = admin_sessions.get(chat_id, {})
-            if not session.get('authenticated') or datetime.utcnow() >= session.get('expires', datetime.utcnow()):
-                send_message("Please use /admin_login <password> first.", reply_markup=get_navigation_keyboard())
-                return jsonify({'error': 'Not authenticated'}), 403
 
         if command == '/create' and len(args) == 4:
             tracking, title, origin, destination = args
@@ -1197,12 +1026,17 @@ def telegram_webhook(token):
                 send_message("Simulation already running", reply_markup=get_navigation_keyboard())
                 return jsonify({'error': 'Simulation already running'}), 400
             try:
-                run_simulation_async.delay(shipment.id, num_points, step_hours)
-                send_message(f"Started simulation for {tracking} with {num_points} points", reply_markup=get_navigation_keyboard(tracking))
+                run_simulation(shipment, num_points, step_hours, simulation_state)
+                send_message(f"Simulated {num_points} checkpoints for {tracking}. Final status: {shipment.status}", reply_markup=get_navigation_keyboard(tracking))
                 return jsonify({'message': 'OK'})
-            except Exception as e:
+            except ValueError as e:
                 send_message(f"Simulation error: {str(e)}", reply_markup=get_navigation_keyboard())
-                return jsonify({'error': str(e)}), 500
+                return jsonify({'error': str(e)}), 400
+            except SQLAlchemyError as e:
+                db.session.rollback()
+                logger.error(f"Database error: {e}")
+                send_message("Database error.", reply_markup=get_navigation_keyboard())
+                return jsonify({'error': 'Database error'}), 500
 
         elif command == '/track_multiple' and args:
             trackings = args[0].split(',')
