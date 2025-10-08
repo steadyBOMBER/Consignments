@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Login</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @keyframes pulse-glow {
+            0%, 100% { box-shadow: 0 0 15px rgba(220, 38, 38, 0.5); }
+            50% { box-shadow: 0 0 25px rgba(220, 38, 38, 0.8); }
+        }
+        .glow-pulse {
+            animation: pulse-glow 1.5s ease-in-out infinite;
+        }
+    </style>
+</head>
+<body class="bg-black flex items-center justify-center min-h-screen">
+    <div class="bg-gray-900 p-10 rounded-sm shadow-2xl w-full max-w-md border-2 border-red-700 glow-pulse">
+        <h1 class="text-4xl font-black text-red-600 text-center mb-8 tracking-tight">RESTRICTED ACCESS</h1>
+        <form method="POST" class="space-y-6">
+            <div>
+                <label for="password" class="block text-base font-extrabold text-red-500 uppercase">ENTER CODE NOW</label>
+                <input type="password" name="password" id="password" 
+                       class="mt-2 w-full px-5 py-4 bg-black border-2 border-red-700 rounded-sm text-red-400 placeholder-red-600/50 focus:outline-none focus:ring-4 focus:ring-red-600 focus:border-red-600 transition-all duration-150" 
+                       placeholder="CODE REQUIRED" required>
+            </div>
+            <button type="submit" 
+                    class="w-full bg-red-700 text-black py-4 px-6 rounded-sm font-extrabold uppercase tracking-widest hover:bg-red-800 focus:outline-none focus:ring-4 focus:ring-red-600 focus:ring-offset-2 focus:ring-offset-black transition-all duration-150 shadow-lg">
+                BREACH SYSTEM
+            </button>
+        </form>
+    </div>
+</body>
+</html>
