@@ -788,12 +788,16 @@ def health():
         logger.error(f"🩺 Health check failed: Database is sulking 😿: {e}")
         return jsonify({'status': 'unhealthy', 'database': 'disconnected'}), 500
 
-# Routes
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
         data = request.form
-        if data.get('password') and check_password_hash(current_app.config.get('ADMIN_PASSWORD_HASH'), data.get('password')):
+        password = data.get('password')
+        admin_password_hash = current_app.config.get('ADMIN_PASSWORD_HASH')
+        if not admin_password_hash:
+            logger.error(f"🔐 No ADMIN_PASSWORD_HASH in config! Can't let you in! 😿")
+            return render_template('error.html', error='Server misconfigured: Missing admin password hash'), 500
+        if password and check_password_hash(admin_password_hash, password):
             access_token = create_access_token(identity='admin')
             response = redirect(url_for('admin'))
             response.set_cookie('access_token', access_token, httponly=True)
