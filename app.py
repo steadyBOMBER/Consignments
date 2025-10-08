@@ -859,27 +859,23 @@ def health():
         return jsonify({'status': 'unhealthy'}), 500
 
 # Routes
+from flask import Flask, request, render_template, redirect, url_for
+from flask_jwt_extended import create_access_token
+
+app = Flask(__name__)
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    try:
-        if request.method == 'POST':
-            data = request.form
-            if data.get('password') and check_password_hash(app.config['ADMIN_PASSWORD_HASH'], data['password']):
-                access_token = create_access_token(identity='admin')
-                response = redirect(url_for('admin'))
-                response.set_cookie('access_token', access_token, httponly=True)
-                return response
-            return render_template('error.html', error='Invalid password'), 401
-        return '''
-        <form method="POST">
-            <label>Password: <input type="password" name="password"></label>
-            <button type="submit">Login</button>
-        </form>
-        '''
-    except Exception as e:
-        logger.error(f"Login error: {e}")
-        return render_template('error.html', error='Login failed'), 400
-
+    if request.method == 'POST':
+        data = request.form
+        if data.get('password') == current_app.config.get('ADMIN_PASSWORD'):
+            access_token = create_access_token(identity='admin')
+            response = redirect(url_for('admin'))
+            response.set_cookie('access_token', access_token, httponly=True)
+            return response
+        return render_template('error.html', error='Invalid password'), 401
+    return render_template('login.html')
+    
 @app.route('/track', methods=['GET'])
 def track_redirect():
     try:
