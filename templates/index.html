@@ -61,13 +61,13 @@
             font-size: 2em;
             margin: 20px 0;
         }
-        .track-section, .subscribe-section {
+        .track-section {
             display: flex;
             justify-content: center;
             margin: 20px 0;
             padding: 0 10px;
         }
-        .track-box, .subscribe-box {
+        .track-box {
             background: #fff;
             padding: 20px;
             border-radius: 5px;
@@ -76,13 +76,13 @@
             text-align: center;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }
-        .track-box label, .subscribe-box label {
+        .track-box label {
             display: block;
             color: #333;
             margin-bottom: 8px;
             font-weight: bold;
         }
-        .track-box input, .subscribe-box input {
+        .track-box input {
             width: 100%;
             padding: 10px;
             margin-bottom: 10px;
@@ -91,7 +91,7 @@
             box-sizing: border-box;
             font-size: 16px;
         }
-        .track-box button, .subscribe-box button {
+        .track-box button {
             background-color: #d32f2f;
             color: white;
             padding: 12px 20px;
@@ -102,9 +102,31 @@
             box-sizing: border-box;
             font-size: 16px;
             transition: background-color 0.3s ease;
+            position: relative;
         }
-        .track-box button:hover, .subscribe-box button:hover {
+        .track-box button:hover {
             background-color: #b71c1c;
+        }
+        .track-box button:disabled {
+            background-color: #e57373;
+            cursor: not-allowed;
+        }
+        .spinner {
+            display: none;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #d32f2f;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+        }
+        @keyframes spin {
+            0% { transform: translate(-50%, -50%) rotate(0deg); }
+            100% { transform: translate(-50%, -50%) rotate(360deg); }
         }
         .faq-section {
             margin: 20px 10px;
@@ -131,7 +153,7 @@
             color: #333;
             font-size: 14px;
         }
-        .tracking-result, .subscribe-result {
+        .tracking-result {
             margin-top: 20px;
             padding: 10px;
             background: #e0e0e0;
@@ -215,7 +237,7 @@
             .header img {
                 height: 30px;
             }
-            .header .menu {
+            .menu {
                 font-size: 20px;
                 padding: 8px;
             }
@@ -232,13 +254,19 @@
                 font-size: 1.5em;
                 margin: 15px 0;
             }
-            .track-box, .subscribe-box {
+            .track-box {
                 padding: 15px;
                 max-width: 100%;
             }
-            .track-box input, .track-box button, .subscribe-box input, .subscribe-box button {
+            .track-box input, .track-box button {
                 font-size: 14px;
                 padding: 8px;
+            }
+            .spinner {
+                width: 16px;
+                height: 16px;
+                border-width: 2px;
+                border-top-width: 2px;
             }
             .faq-section {
                 margin: 15px 5px;
@@ -252,7 +280,7 @@
             .faq-item div {
                 font-size: 12px;
             }
-            .tracking-result, .subscribe-result {
+            .tracking-result {
                 font-size: 12px;
             }
             .footer {
@@ -305,12 +333,16 @@
             .title {
                 font-size: 1.8em;
             }
-            .track-box, .subscribe-box {
+            .track-box {
                 max-width: 350px;
                 padding: 15px;
             }
-            .track-box input, .track-box button, .subscribe-box input, .subscribe-box button {
+            .track-box input, .track-box button {
                 font-size: 15px;
+            }
+            .spinner {
+                width: 18px;
+                height: 18px;
             }
             .faq-section {
                 margin: 15px 10px;
@@ -344,7 +376,7 @@
         }
 
         @media (min-width: 769px) and (max-width: 1024px) {
-            .track-box, .subscribe-box {
+            .track-box {
                 max-width: 500px;
             }
             .faq-section {
@@ -376,10 +408,10 @@
         }
 
         @media (min-width: 1025px) {
-            .track-section, .subscribe-section {
+            .track-section {
                 margin: 30px 0;
             }
-            .track-box, .subscribe-box {
+            .track-box {
                 max-width: 600px;
                 padding: 25px;
             }
@@ -418,14 +450,14 @@
         }
 
         /* Touch-friendly adjustments */
-        .menu, .track-box button, .subscribe-box button, .admin-dot {
+        .menu, .track-box button, .admin-dot {
             -webkit-tap-highlight-color: transparent;
         }
     </style>
 </head>
 <body>
     <div class="header">
-        <img src="dhl-logo.png" alt="DHL Logo">
+        <img src="/static/dhl-logo.png" alt="DHL Logo">
         <div class="menu" aria-label="Toggle navigation menu">≡</div>
         <div class="menu-content">
             <a href="#">Home</a>
@@ -436,25 +468,13 @@
     <div class="title">Track & Trace</div>
     <div class="track-section">
         <div class="track-box">
-            <form id="trackForm" action="/track/" method="GET">
+            <form id="trackForm" onsubmit="handleSubmit(event)">
                 <label for="trackingInput">Tracking Number</label>
-                <input type="text" id="trackingInput" name="tracking" placeholder="Enter your tracking number(s)" pattern="\d{10,12}" title="Enter a 10-12 digit tracking number" required maxlength="50">
-                <button type="submit">Track</button>
-                <div id="trackingResult" class="tracking-result"></div>
-            </form>
-        </div>
-    </div>
-    <div class="subscribe-section">
-        <div class="subscribe-box">
-            <form id="subscribeForm">
-                <label for="subscribeTracking">Tracking Number</label>
-                <input type="text" id="subscribeTracking" placeholder="Enter tracking number" pattern="\d{10,12}" title="Enter a 10-12 digit tracking number" required maxlength="50">
-                <label for="subscribeEmail">Email (optional)</label>
+                <input type="text" id="trackingInput" name="tracking" placeholder="Enter your tracking number" pattern="\d{10,12}" title="Enter a 10-12 digit tracking number" required maxlength="50">
+                <label for="subscribeEmail" class="mt-4">Email (optional, for updates)</label>
                 <input type="email" id="subscribeEmail" placeholder="Enter your email">
-                <label for="subscribePhone">Phone (optional)</label>
-                <input type="tel" id="subscribePhone" placeholder="Enter your phone number">
-                <button type="submit">Subscribe to Updates</button>
-                <div id="subscribeResult" class="subscribe-result"></div>
+                <button type="submit">Track <span class="spinner"></span></button>
+                <div id="result" class="tracking-result"></div>
             </form>
         </div>
     </div>
@@ -526,50 +546,76 @@
             faq.style.display = faq.style.display === 'none' ? 'block' : 'none';
         }
 
-        // Subscribe to Updates
-        document.getElementById('subscribeForm').addEventListener('submit', async function(e) {
+        // Handle Form Submission
+        async function handleSubmit(e) {
             e.preventDefault();
-            const tracking = document.getElementById('subscribeTracking').value;
+            const tracking = document.getElementById('trackingInput').value;
             const email = document.getElementById('subscribeEmail').value;
-            const phone = document.getElementById('subscribePhone').value;
-            const subscribeResult = document.getElementById('subscribeResult');
+            const result = document.getElementById('result');
+            const button = document.querySelector('#trackForm button');
+            const spinner = document.querySelector('#trackForm .spinner');
 
+            // Validate tracking number
             if (!tracking) {
-                subscribeResult.textContent = 'Please enter a tracking number.';
-                subscribeResult.style.display = 'block';
+                result.textContent = 'Please enter a tracking number.';
+                result.style.display = 'block';
                 return;
             }
             if (!/^\d{10,12}$/.test(tracking)) {
-                subscribeResult.textContent = 'Please enter a valid 10-12 digit tracking number.';
-                subscribeResult.style.display = 'block';
-                return;
-            }
-            if (!email && !phone) {
-                subscribeResult.textContent = 'Please provide an email or phone number.';
-                subscribeResult.style.display = 'block';
+                result.textContent = 'Please enter a valid 10-12 digit tracking number.';
+                result.style.display = 'block';
                 return;
             }
 
-            const data = { email: email || '', phone: phone || '' };
-            try {
-                const response = await fetch(`/shipments/${tracking}/subscribe`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(data)
-                });
-                const result = await response.json();
-                if (!response.ok) {
-                    subscribeResult.textContent = result.error || 'Subscription failed.';
-                    subscribeResult.style.display = 'block';
+            // Validate email if provided
+            if (email) {
+                const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+                if (!emailRegex.test(email)) {
+                    result.textContent = 'Please enter a valid email address.';
+                    result.style.display = 'block';
                     return;
                 }
-                subscribeResult.textContent = 'Subscribed successfully! You will receive updates.';
-                subscribeResult.style.display = 'block';
-            } catch (error) {
-                subscribeResult.textContent = 'Error subscribing to updates. Please try again later.';
-                subscribeResult.style.display = 'block';
             }
-        });
+
+            // Show spinner and disable button if email is provided
+            if (email) {
+                button.disabled = true;
+                button.textContent = 'Processing...';
+                spinner.style.display = 'inline-block';
+            }
+
+            // Subscribe if email is provided
+            if (email) {
+                try {
+                    const response = await fetch(`/shipments/${tracking}/subscribe`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ email })
+                    });
+                    const data = await response.json();
+                    if (!response.ok) {
+                        result.textContent = data.error || 'Subscription failed.';
+                        result.style.display = 'block';
+                    } else {
+                        result.textContent = 'Subscribed successfully! You will receive updates.';
+                        result.style.display = 'block';
+                    }
+                } catch (error) {
+                    result.textContent = 'Error subscribing to updates. Proceeding to tracking...';
+                    result.style.display = 'block';
+                } finally {
+                    // Hide spinner and re-enable button
+                    button.disabled = false;
+                    button.textContent = 'Track';
+                    spinner.style.display = 'none';
+                }
+            }
+
+            // Redirect to tracking page
+            setTimeout(() => {
+                window.location.href = `/track/?tracking=${encodeURIComponent(tracking)}`;
+            }, email ? 1000 : 0); // Delay redirect slightly if subscribing to show result
+        }
 
         // Tawk.to Script
         var Tawk_API = Tawk_API || {}, Tawk_LoadStart = new Date();
