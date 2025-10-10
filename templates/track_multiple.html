@@ -6,27 +6,23 @@
     <title>Track Multiple Shipments</title>
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
 </head>
-<body class="bg-gray-100 font-sans">
-    <div class="max-w-4xl mx-auto p-6">
-        <h1 class="text-3xl font-bold mb-6">Track Multiple Shipments</h1>
-
-        {% if error %}
-            <div class="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 mb-6" role="alert">
-                <p>{{ error }}</p>
+<body class="bg-gray-100">
+    <div class="container mx-auto py-8">
+        <h1 class="text-3xl font-bold mb-4">Track Multiple Shipments</h1>
+        {% if tracked_shipments %}
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {% for shipment in tracked_shipments %}
+            <div class="bg-white rounded shadow p-6 mb-6">
+                <h2 class="text-xl font-semibold">{{ shipment.title }} ({{ shipment.tracking }})</h2>
+                <p>Status: <span class="font-semibold">{{ shipment.status }}</span></p>
+                <p>ETA: {{ shipment.eta or 'N/A' }}</p>
+                <a href="{{ url_for('track', tracking=shipment.tracking) }}" class="text-blue-600 hover:underline">View Details</a>
             </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="bg-red-100 text-red-700 p-4 rounded">No shipments found.</div>
         {% endif %}
-
-        <div class="bg-white shadow-md rounded-lg p-6 mb-6">
-            <h2 class="text-2xl font-semibold mb-4">Shipment Statuses</h2>
-            {% if tracked_shipments %}
-                <ul class="space-y-4">
-                    {% for shipment in tracked_shipments %}
-                        <li class="border-b py-2">
-                            <a href="{{ url_for('track', tracking=shipment.tracking) }}" class="text-blue-600 hover:underline">
-                                {{ shipment.title }} ({{ shipment.tracking }}): {{ shipment.status }}
-                            </a>
-                            <p><span class="font-medium">ETA:</span> {{ shipment.eta.isoformat() + 'Z' if shipment.eta else 'Not set' }}</p>
-                            <p><span class="font-medium">Distance:</span> {{ shipment.distance_km | round(2) }} km</p>
-                        </li>
-                    {% endfor %}
-                </ul>
+    </div>
+</body>
+</html>
