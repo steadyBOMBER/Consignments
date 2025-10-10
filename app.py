@@ -1,3 +1,4 @@
+# --- Flask app initialization moved to the top ---
 import os
 import logging
 import smtplib
@@ -61,12 +62,17 @@ class ShipmentStatus(Enum):
     OUT_FOR_DELIVERY = 'Out for Delivery'
     DELIVERED = 'Delivered'
 
-# Define required_vars if not already defined
+# Load required environment variables and fail early if missing
 required_vars = [
     'SECRET_KEY', 'SQLALCHEMY_DATABASE_URI', 'JWT_SECRET_KEY', 'CELERY_BROKER_URL',
     'CELERY_RESULT_BACKEND', 'REDIS_URL', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS',
     'SMTP_FROM', 'APP_BASE_URL'
 ]
+for var in required_vars:
+    value = os.environ.get(var)
+    if value is None:
+        raise RuntimeError(f"Missing required environment variable: {var}")
+    app.config[var] = value
 
 # Configure logging
 handler = RotatingFileHandler('app.log', maxBytes=1000000, backupCount=5)
@@ -74,10 +80,6 @@ handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s [
 app.logger.addHandler(handler)
 app.logger.setLevel(logging.INFO)
 logger = app.logger
-
-for var in required_vars:
-    if not os.getenv(var):
-        raise ValueError(f"Missing required environment variable: {var}")
 
 # Initialize extensions
 db = SQLAlchemy(app)
