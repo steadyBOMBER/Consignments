@@ -1,28 +1,5 @@
-# Add index route for template and Socket.IO compatibility
-@app.route('/')
-def index():
-    return render_template('index.html')
 
-# Restore get_smtp_connection helper function and cache initialization
-def get_smtp_connection():
-    server = smtplib.SMTP(app.config['SMTP_HOST'], app.config['SMTP_PORT'])
-    server.starttls()
-    server.login(app.config['SMTP_USER'], app.config['SMTP_PASS'])
-    return server
-
-# Initialize Flask-Caching
-cache = Cache(app, config={'CACHE_TYPE': 'redis', 'CACHE_REDIS_URL': app.config['REDIS_URL']})
-
-# Import requests for HTTP calls
-import requests
-# Shipment status enum
-from enum import Enum
-class ShipmentStatus(Enum):
-    CREATED = 'Created'
-    IN_TRANSIT = 'In Transit'
-    OUT_FOR_DELIVERY = 'Out for Delivery'
-    DELIVERED = 'Delivered'
-
+# --- Flask app initialization moved to the top ---
 import os
 import logging
 import smtplib
@@ -31,9 +8,6 @@ import json
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, render_template, current_app, redirect, url_for
-from flask_jwt_extended import jwt_required, create_access_token
-from flask_limiter import Limiter
 from flask import Flask, request, jsonify, render_template, current_app, redirect, url_for
 from flask_jwt_extended import jwt_required, create_access_token
 from flask_limiter import Limiter
@@ -61,17 +35,40 @@ try:
 except ImportError:
     TwilioRestException = Exception
 
+# Initialize Flask app (must be before any @app.route usage)
+app = Flask(__name__, template_folder='templates')
+
+# Add index route for template and Socket.IO compatibility
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+# Restore get_smtp_connection helper function and cache initialization
+def get_smtp_connection():
+    server = smtplib.SMTP(app.config['SMTP_HOST'], app.config['SMTP_PORT'])
+    server.starttls()
+    server.login(app.config['SMTP_USER'], app.config['SMTP_PASS'])
+    return server
+
+# Initialize Flask-Caching
+cache = Cache(app, config={'CACHE_TYPE': 'redis', 'CACHE_REDIS_URL': app.config['REDIS_URL']})
+
+# Import requests for HTTP calls
+import requests
+# Shipment status enum
+from enum import Enum
+class ShipmentStatus(Enum):
+    CREATED = 'Created'
+    IN_TRANSIT = 'In Transit'
+    OUT_FOR_DELIVERY = 'Out for Delivery'
+    DELIVERED = 'Delivered'
+
 # Define required_vars if not already defined
 required_vars = [
     'SECRET_KEY', 'SQLALCHEMY_DATABASE_URI', 'JWT_SECRET_KEY', 'CELERY_BROKER_URL',
     'CELERY_RESULT_BACKEND', 'REDIS_URL', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS',
     'SMTP_FROM', 'APP_BASE_URL'
 ]
-
-
-
-# Initialize Flask app
-app = Flask(__name__, template_folder='templates')
 
 # Configure logging
 handler = RotatingFileHandler('app.log', maxBytes=1000000, backupCount=5)
