@@ -3,83 +3,595 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Track Shipment</title>
+    <title>Track Shipment {{ shipment.tracking if shipment else '' }}</title>
+    <!-- Tailwind CSS -->
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/dayjs.min.js"></script>
-    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <!-- Socket.IO -->
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" integrity="sha384-2huaZv1p4dt2ZUXEW8sx4aeVBL1rQe01U6FjPaUrRaN8S7XjLHkAjw6UTy5T3gv3" crossorigin="anonymous"></script>
+    <!-- Day.js and plugins -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dayjs/1.11.10/dayjs.min.js" integrity="sha512-FwZ0+5IpG/gj1LHgrVCeGYZ2ddy1k94mU3fA8DRhC3xQfDuXgac7uK1o9gH6Z8vHZmzvH0wY8NsuQ/3nF5I2ug==" crossorigin=""></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dayjs/1.11.10/plugin/utc.min.js" integrity="sha512-2jN5tV4jsz/d2WV6eKXxk3+1nPgcZf7YcRmsI3k3//RGZmVWSrQVRzS0/3h6/TeQBw2Nvb2IxmGhV2+5Arf2VoA==" crossorigin=""></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dayjs/1.11.10/plugin/timezone.min.js" integrity="sha512-nZ73bLja2fQh6y8wW1x+66OnF2tSQi7F01c2yXzN3ONTh6EG3pPjX8fF3L2E5qQ6kyf3Nmb+Mn2c1Zp3nW+kwg==" crossorigin=""></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dayjs/1.11.10/plugin/customParseFormat.min.js" integrity="sha512-kV29i1JlwA6 Pagan4aKvaD8Z5G4ERx4oYpFXiI5Ph6Fo8v+2kNoKpeYQUg41sWoV7urdK4A9TJvoQ2jBraK5rA==" crossorigin=""></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            line-height: 1.6;
+            background-color: #f5f5f5;
+        }
+        .header {
+            background: linear-gradient(to right, #ffcc00, #fff);
+            padding: 10px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+        }
+        .header img {
+            height: 40px;
+            max-width: 100%;
+        }
+        .header .menu {
+            font-size: 24px;
+            cursor: pointer;
+            padding: 10px;
+        }
+        .menu-content {
+            display: none;
+            position: absolute;
+            right: 10px;
+            top: 60px;
+            background: #fff;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            padding: 10px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            min-width: 150px;
+            z-index: 1000;
+        }
+        .menu-content a {
+            display: block;
+            padding: 8px 12px;
+            color: #d32f2f;
+            text-decoration: none;
+            font-size: 16px;
+        }
+        .menu-content a:hover {
+            background-color: #f5f5f5;
+        }
+        #map {
+            height: 50vh;
+            width: 100%;
+            margin-bottom: 1.5rem;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        #map-loading {
+            position: absolute;
+            inset: 0;
+            background-color: rgba(229, 231, 235, 0.8);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+        .subscribe-box button {
+            background-color: #d32f2f;
+            color: white;
+            padding: 12px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            width: 100%;
+            box-sizing: border-box;
+            font-size: 16px;
+            transition: background-color 0.3s ease;
+            position: relative;
+        }
+        .subscribe-box button:hover {
+            background-color: #b71c1c;
+        }
+        .subscribe-box button:disabled {
+            background-color: #e57373;
+            cursor: not-allowed;
+        }
+        .spinner {
+            display: none;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #d32f2f;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+        }
+        @keyframes spin {
+            0% { transform: translate(-50%, -50%) rotate(0deg); }
+            100% { transform: translate(-50%, -50%) rotate(360deg); }
+        }
+        /* Responsive Design */
+        @media (max-width: 480px) {
+            .header {
+                padding: 8px 10px;
+            }
+            .header img {
+                height: 30px;
+            }
+            .menu {
+                font-size: 20px;
+                padding: 8px;
+            }
+            .menu-content {
+                top: 50px;
+                right: 5px;
+                min-width: 120px;
+            }
+            .menu-content a {
+                font-size: 14px;
+                padding: 6px 10px;
+            }
+            #map {
+                height: 40vh;
+            }
+            .subscribe-box input, .subscribe-box button {
+                font-size: 14px;
+                padding: 8px;
+            }
+            .spinner {
+                width: 16px;
+                height: 16px;
+                border-width: 2px;
+                border-top-width: 2px;
+            }
+        }
+        @media (min-width: 481px) and (max-width: 768px) {
+            .header {
+                padding: 10px 15px;
+            }
+            .header img {
+                height: 35px;
+            }
+            .menu-content {
+                top: 55px;
+                right: 10px;
+            }
+            #map {
+                height: 45vh;
+            }
+            .subscribe-box input, .subscribe-box button {
+                font-size: 15px;
+            }
+            .spinner {
+                width: 18px;
+                height: 18px;
+            }
+        }
+        /* Touch-friendly adjustments */
+        .menu, .subscribe-box button {
+            -webkit-tap-highlight-color: transparent;
+        }
+    </style>
 </head>
 <body class="bg-gray-100">
-    <div class="container mx-auto py-8">
-        <h1 class="text-3xl font-bold mb-4">Track Shipment</h1>
+    <div class="header">
+        <img src="/static/dhl-logo.png" alt="DHL Logo">
+        <div class="menu" aria-label="Toggle navigation menu">≡</div>
+        <div class="menu-content">
+            <a href="{{ url_for('index') }}">Home</a>
+            <a href="#">Contact</a>
+            <a href="#">Help</a>
+        </div>
+    </div>
+
+    <div class="max-w-4xl mx-auto p-6">
         {% if shipment %}
-        <div class="bg-white rounded shadow p-6 mb-6">
-            <h2 class="text-xl font-semibold">{{ shipment.title }} ({{ shipment.tracking }})</h2>
-            <p>Status: <span class="font-semibold">{{ shipment.status }}</span></p>
-            <p>ETA: {{ shipment.eta or 'N/A' }}</p>
+        <h1 class="text-3xl font-bold mb-6 text-red-600">Track Shipment: {{ shipment.tracking }}</h1>
+
+        <!-- Shipment Details -->
+        <div class="bg-white shadow-md rounded-lg p-6 mb-6">
+            <h2 class="text-2xl font-semibold mb-4">{{ shipment.title }}</h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div id="shipment-details">
+                    <p><span class="font-medium">Status:</span> <span id="status">{{ shipment.status }}</span></p>
+                    <p><span class="font-medium">Origin:</span> {{ shipment.origin_address or (shipment.origin_lat ~ ', ' ~ shipment.origin_lng) }}</p>
+                    <p><span class="font-medium">Destination:</span> {{ shipment.dest_address or (shipment.dest_lat ~ ', ' ~ shipment.dest_lng) }}</p>
+                    <p><span class="font-medium">Distance:</span> {{ shipment.distance_km | round(2) }} km</p>
+                    <p><span class="font-medium">ETA:</span> <span data-eta><script>document.write(formatTimestamp('{{ shipment.eta.isoformat() + 'Z' if shipment.eta else '' }}'))</script></span></p>
+                    <p><span class="font-medium">Created:</span> <script>document.write(formatTimestamp('{{ shipment.created_at.isoformat() + 'Z' }}'))</script></p>
+                </div>
+                <div class="subscribe-box">
+                    <h3 class="text-lg font-semibold mb-2">Subscribe for Updates</h3>
+                    <form id="subscribeForm" onsubmit="handleSubscribe(event)">
+                        <div class="mb-4">
+                            <label for="email" class="block text-gray-700">Email</label>
+                            <input type="email" id="email" name="email" class="w-full p-2 border rounded focus:outline-none focus:ring-2 focus:ring-red-600" placeholder="Enter your email" aria-describedby="email-help">
+                            <small id="email-help" class="text-gray-600">Enter your email to receive updates.</small>
+                        </div>
+                        <button type="submit">Subscribe <span class="spinner"></span></button>
+                        <div id="subscribe-result" class="tracking-result mt-4 p-2 bg-gray-200 rounded text-sm hidden"></div>
+                    </form>
+                </div>
+            </div>
         </div>
-        <div id="map" class="w-full h-96 mb-6 rounded shadow"></div>
-        <div class="bg-white rounded shadow p-6 mb-6">
-            <h3 class="text-lg font-semibold mb-2">Checkpoints</h3>
-            <ul>
-                {% for cp in checkpoints %}
-                <li class="mb-2">
-                    <span class="font-semibold">{{ cp.label }}</span> - {{ cp.note or '' }}<br>
-                    <span class="text-sm text-gray-600">{{ cp.timestamp }}</span>
-                </li>
-                {% endfor %}
+
+        <!-- Route Map -->
+        <div class="bg-white shadow-md rounded-lg p-6 mb-6">
+            <h2 class="text-2xl font-semibold mb-4">Route Map</h2>
+            <div id="map" role="region" aria-label="Map showing shipment route and checkpoints" class="relative">
+                <div id="map-loading">
+                    <p class="text-gray-700">Loading map...</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Checkpoints -->
+        <div class="bg-white shadow-md rounded-lg p-6 mb-6">
+            <h2 class="text-2xl font-semibold mb-4">Checkpoints</h2>
+            <ul id="checkpoint-list" class="space-y-4">
+                {% if checkpoints %}
+                    {% for checkpoint in checkpoints %}
+                        <li class="border-b py-2">
+                            <p><span class="font-medium">Position:</span> {{ checkpoint.position }}</p>
+                            <p><span class="font-medium">Label:</span> {{ checkpoint.label }}</p>
+                            <p><span class="font-medium">Location:</span> ({{ checkpoint.lat | round(4) }}, {{ checkpoint.lng | round(4) }})</p>
+                            <p><span class="font-medium">Note:</span> {{ checkpoint.note or 'None' }}</p>
+                            <p><span class="font-medium">Status:</span> {{ checkpoint.status or 'None' }}</p>
+                            {% if checkpoint.proof_photo %}
+                                <p><span class="font-medium">Proof Photo:</span> <a href="{{ checkpoint.proof_photo }}" class="text-blue-600 hover:underline" target="_blank" rel="noopener">View</a></p>
+                            {% endif %}
+                            <p><span class="font-medium">Timestamp:</span> <script>document.write(formatTimestamp('{{ checkpoint.timestamp.isoformat() + 'Z' if checkpoint.timestamp else '' }}'))</script></p>
+                        </li>
+                    {% endfor %}
+                {% else %}
+                    <p>No checkpoints found.</p>
+                {% endif %}
+            </ul>
+            {% if pagination.has_prev or pagination.has_next %}
+                <div class="mt-4 flex justify-between">
+                    {% if pagination.has_prev %}
+                        <a href="{{ url_for('track', tracking=shipment.tracking, page=pagination.prev_num, per_page=pagination.per_page) }}" class="text-blue-600 hover:underline">Previous</a>
+                    {% else %}
+                        <span></span>
+                    {% endif %}
+                    {% if pagination.has_next %}
+                        <a href="{{ url_for('track', tracking=shipment.tracking, page=pagination.next_num, per_page=pagination.per_page) }}" class="text-blue-600 hover:underline">Next</a>
+                    {% endif %}
+                </div>
+            {% endif %}
+        </div>
+
+        <!-- Status History -->
+        <div class="bg-white shadow-md rounded-lg p-6 mb-6">
+            <h2 class="text-2xl font-semibold mb-4">Status History</h2>
+            <ul id="history-list" class="space-y-2">
+                {% if history %}
+                    {% for status in history %}
+                        <li class="border-b py-2">
+                            <p><span class="font-medium">Status:</span> {{ status.status }}</p>
+                            <p><span class="font-medium">Timestamp:</span> <script>document.write(formatTimestamp('{{ status.timestamp.isoformat() + 'Z' if status.timestamp else '' }}'))</script></p>
+                        </li>
+                    {% endfor %}
+                {% else %}
+                    <p>No status history available.</p>
+                {% endif %}
             </ul>
         </div>
-        <div class="bg-white rounded shadow p-6">
-            <h3 class="text-lg font-semibold mb-2">Status History</h3>
-            <ul>
-                {% for h in history %}
-                <li>{{ h.status }} - {{ h.timestamp }}</li>
-                {% endfor %}
-            </ul>
-        </div>
+
+        <a href="{{ url_for('index') }}" class="mt-6 inline-block text-blue-600 hover:underline">Back to Home</a>
         {% else %}
         <div class="bg-red-100 text-red-700 p-4 rounded">Shipment not found.</div>
         {% endif %}
     </div>
-    <script>
-        {% if shipment %}
-        var map = L.map('map').setView([{{ origin_lat }}, {{ origin_lng }}], 8);
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            maxZoom: 19,
-        }).addTo(map);
-        var checkpoints = [
-            {% for cp in checkpoints %}
-            [{{ cp.lat }}, {{ cp.lng }}],
-            {% endfor %}
-        ];
-        if (checkpoints.length > 0) {
-            var polyline = L.polyline(checkpoints, {color: 'blue'}).addTo(map);
-            map.fitBounds(polyline.getBounds());
-            checkpoints.forEach(function(coord, idx) {
-                L.marker(coord).addTo(map).bindPopup('Checkpoint ' + (idx+1));
-            });
-        }
-        var socket = io();
-        socket.emit('subscribe', '{{ shipment.tracking }}');
-        socket.on('update', function(data) {
-            location.reload();
-        });
-        {% endif %}
-    </script>
-    <!--Start of Tawk.to Script-->
+
+    <!-- Footer -->
+    <div class="footer">
+        <div class="footer-content">
+            <div class="footer-section">
+                <h3 class="text-red-600 font-bold">Contact Us</h3>
+                <p>Email: support@dhl.com</p>
+                <p>Phone: +234 700 345 6789</p>
+                <p>Address: 1 DHL Way, Lagos, Nigeria</p>
+            </div>
+            <div class="footer-section">
+                <h3 class="text-red-600 font-bold">Follow Us</h3>
+                <a href="https://x.com/dhl" target="_blank" class="hover:text-red-600">X</a>
+                <a href="https://facebook.com/dhl" target="_blank" class="hover:text-red-600">Facebook</a>
+                <a href="https://instagram.com/dhl" target="_blank" class="hover:text-red-600">Instagram</a>
+            </div>
+            <div class="footer-section">
+                <h3 class="text-red-600 font-bold">Legal</h3>
+                <a href="#" class="hover:text-red-600">Terms & Conditions</a>
+                <a href="#" class="hover:text-red-600">Privacy Policy</a>
+                <a href="#" class="hover:text-red-600">Cookies</a>
+            </div>
+            <div class="footer-section">
+                <h3 class="text-red-600 font-bold">Support</h3>
+                <a href="#" class="hover:text-red-600">Help Center</a>
+                <a href="#" class="hover:text-red-600">FAQs</a>
+                <a href="#" class="hover:text-red-600">Contact</a>
+            </div>
+        </div>
+        <div class="copyright">
+            © 2025 DHL International. All rights reserved.
+        </div>
+        <a href="/login" class="admin-dot" aria-label="Admin Access"></a>
+    </div>
+
+    <!-- Tawk.to Widget -->
     <script type="text/javascript">
-    var Tawk_API=Tawk_API||{}, Tawk_LoadStart=new Date();
-    (function(){
-    var s1=document.createElement("script"),s0=document.getElementsByTagName("script")[0];
-    s1.async=true;
-    s1.src='https://embed.tawk.to/68e86cda366f2e1951fd6e9f/1j75uidt9';
-    s1.charset='UTF-8';
-    s1.setAttribute('crossorigin','*');
-    s0.parentNode.insertBefore(s1,s0);
-    })();
+        var Tawk_API = Tawk_API || {}, Tawk_LoadStart = new Date();
+        (function(){
+            var s1 = document.createElement("script"), s0 = document.getElementsByTagName("script")[0];
+            s1.async = true;
+            s1.src = 'https://embed.tawk.to/68e86cda366f2e1951fd6e9f/1j75uidt9';
+            s1.charset = 'UTF-8';
+            s1.setAttribute('crossorigin', '*');
+            s0.parentNode.insertBefore(s1, s0);
+        })();
     </script>
-    <!--End of Tawk.to Script-->
+
+    <script>
+        // Initialize Day.js plugins
+        dayjs.extend(window.dayjs_plugin_utc);
+        dayjs.extend(window.dayjs_plugin_timezone);
+        dayjs.extend(window.dayjs_plugin_customParseFormat);
+
+        // Format timestamps in WAT (West Africa Time)
+        function formatTimestamp(isoString) {
+            if (!isoString) return 'Not set';
+            return dayjs(isoString).tz('Africa/Lagos').format('MMMM D, YYYY, h:mm A [WAT]');
+        }
+
+        // Handle subscription form submission
+        async function handleSubscribe(e) {
+            e.preventDefault();
+            const email = document.getElementById('email').value.trim();
+            const result = document.getElementById('subscribe-result');
+            const button = document.querySelector('#subscribeForm button');
+            const spinner = document.querySelector('#subscribeForm .spinner');
+
+            // Validate email
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            if (!email) {
+                result.textContent = 'Please enter an email address.';
+                result.classList.remove('success', 'error');
+                result.classList.add('error');
+                result.classList.remove('hidden');
+                return;
+            }
+            if (!emailRegex.test(email)) {
+                result.textContent = 'Please enter a valid email address.';
+                result.classList.remove('success', 'error');
+                result.classList.add('error');
+                result.classList.remove('hidden');
+                return;
+            }
+
+            // Show spinner and disable button
+            button.disabled = true;
+            button.textContent = 'Processing...';
+            spinner.style.display = 'inline-block';
+
+            // Send subscription request
+            try {
+                const response = await fetch(`/shipments/{{ shipment.tracking }}/subscribe`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email })
+                });
+                const data = await response.json();
+                result.classList.remove('success', 'error');
+                result.classList.add(response.ok ? 'success' : 'error');
+                result.textContent = response.ok ? 'Subscribed successfully! You will receive updates.' : data.error || 'Subscription failed.';
+                result.classList.remove('hidden');
+            } catch (error) {
+                result.classList.remove('success', 'error');
+                result.classList.add('error');
+                result.textContent = 'Error subscribing to updates.';
+                result.classList.remove('hidden');
+            } finally {
+                // Hide spinner and re-enable button
+                button.disabled = false;
+                button.textContent = 'Subscribe';
+                spinner.style.display = 'none';
+            }
+        }
+
+        // Initialize map
+        let map;
+        {% if shipment %}
+        try {
+            map = L.map('map').setView([{{ shipment.origin_lat }}, {{ shipment.origin_lng }}], 10);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors',
+                maxZoom: 19
+            }).addTo(map);
+
+            // Initial markers and polyline
+            const originMarker = L.marker([{{ shipment.origin_lat }}, {{ shipment.origin_lng }}])
+                .addTo(map)
+                .bindPopup('<b>Origin</b><br>{{ shipment.origin_address or (shipment.origin_lat ~ ", " ~ shipment.origin_lng) }}')
+                .openPopup();
+            const destMarker = L.marker([{{ shipment.dest_lat }}, {{ shipment.dest_lng }}])
+                .addTo(map)
+                .bindPopup('<b>Destination</b><br>{{ shipment.dest_address or (shipment.dest_lat ~ ", " ~ shipment.dest_lng) }}');
+
+            const checkpoints = [
+                {% for checkpoint in checkpoints %}
+                    {
+                        lat: {{ checkpoint.lat }},
+                        lng: {{ checkpoint.lng }},
+                        position: {{ checkpoint.position }},
+                        label: "{{ checkpoint.label | e }}",
+                        note: "{{ checkpoint.note or 'None' | e }}",
+                        status: "{{ checkpoint.status or 'None' | e }}",
+                        timestamp: "{{ checkpoint.timestamp.isoformat() + 'Z' if checkpoint.timestamp else '' }}",
+                        proof_photo: "{{ checkpoint.proof_photo or '' | e }}"
+                    }{% if not loop.last %},{% endif %}
+                {% endfor %}
+            ];
+
+            const routeCoords = [[{{ shipment.origin_lat }}, {{ shipment.origin_lng }}]];
+            checkpoints.forEach((cp, index) => {
+                routeCoords.push([cp.lat, cp.lng]);
+                let popupContent = `<b>Checkpoint ${index + 1}: ${cp.label}</b><br>` +
+                                  `Location: (${cp.lat.toFixed(4)}, ${cp.lng.toFixed(4)})<br>` +
+                                  `Note: ${cp.note}<br>` +
+                                  `Status: ${cp.status}<br>` +
+                                  `Timestamp: ${formatTimestamp(cp.timestamp)}`;
+                if (cp.proof_photo && cp.proof_photo.startsWith('http')) {
+                    popupContent += `<br><a href="${cp.proof_photo}" target="_blank" rel="noopener" class="text-blue-600 hover:underline">View Proof Photo</a>`;
+                } else if (cp.proof_photo) {
+                    popupContent += `<br><span class="text-red-600">Invalid photo URL</span>`;
+                }
+                L.marker([cp.lat, cp.lng]).addTo(map).bindPopup(popupContent);
+            });
+            routeCoords.push([{{ shipment.dest_lat }}, {{ shipment.dest_lng }}]);
+
+            L.polyline(routeCoords, { color: 'blue', weight: 4 }).addTo(map);
+
+            const bounds = [
+                [{{ shipment.origin_lat }}, {{ shipment.origin_lng }}],
+                [{{ shipment.dest_lat }}, {{ shipment.dest_lng }}],
+                ...checkpoints.map(cp => [cp.lat, cp.lng])
+            ];
+            map.fitBounds(bounds, { padding: [50, 50], maxZoom: 15 });
+
+            // Hide loading indicator
+            document.getElementById('map-loading').style.display = 'none';
+        } catch (e) {
+            console.error('Map initialization failed:', e);
+            document.getElementById('map').innerHTML = '<p class="text-red-600" role="alert">Failed to load map.</p>';
+        }
+
+        // WebSocket for real-time updates
+        try {
+            const socket = io.connect('{{ url_for('index', _external=True) }}', { query: `tracking={{ shipment.tracking }}` });
+            socket.on('connect', () => {
+                socket.emit('subscribe', '{{ shipment.tracking }}');
+            });
+            socket.on('update', (data) => {
+                // Update shipment details
+                document.getElementById('status').textContent = data.status || 'Unknown';
+                document.querySelector('[data-eta]').textContent = formatTimestamp(data.eta) || 'Not set';
+
+                // Update checkpoints list
+                const checkpointList = document.getElementById('checkpoint-list');
+                checkpointList.innerHTML = '';
+                if (data.checkpoints && data.checkpoints.length > 0) {
+                    data.checkpoints.forEach((cp) => {
+                        const li = document.createElement('li');
+                        li.className = 'border-b py-2';
+                        let popupContent = `<p><span class="font-medium">Position:</span> ${cp.position}</p>` +
+                                          `<p><span class="font-medium">Label:</span> ${cp.label}</p>` +
+                                          `<p><span class="font-medium">Location:</span> (${cp.lat.toFixed(4)}, ${cp.lng.toFixed(4)})</p>` +
+                                          `<p><span class="font-medium">Note:</span> ${cp.note || 'None'}</p>` +
+                                          `<p><span class="font-medium">Status:</span> ${cp.status || 'None'}</p>`;
+                        if (cp.proof_photo && cp.proof_photo.startsWith('http')) {
+                            popupContent += `<p><span class="font-medium">Proof Photo:</span> <a href="${cp.proof_photo}" class="text-blue-600 hover:underline" target="_blank" rel="noopener">View</a></p>`;
+                        } else if (cp.proof_photo) {
+                            popupContent += `<p><span class="font-medium">Proof Photo:</span> <span class="text-red-600">Invalid photo URL</span></p>`;
+                        }
+                        popupContent += `<p><span class="font-medium">Timestamp:</span> ${formatTimestamp(cp.timestamp)}</p>`;
+                        li.innerHTML = popupContent;
+                        checkpointList.appendChild(li);
+                    });
+                } else {
+                    checkpointList.innerHTML = '<p>No checkpoints found.</p>';
+                }
+
+                // Update status history
+                const historyList = document.getElementById('history-list');
+                historyList.innerHTML = '';
+                if (data.history && data.history.length > 0) {
+                    data.history.forEach((status) => {
+                        const li = document.createElement('li');
+                        li.className = 'border-b py-2';
+                        li.innerHTML = `<p><span class="font-medium">Status:</span> ${status.status}</p>` +
+                                       `<p><span class="font-medium">Timestamp:</span> ${formatTimestamp(status.timestamp)}</p>`;
+                        historyList.appendChild(li);
+                    });
+                } else {
+                    historyList.innerHTML = '<p>No status history available.</p>';
+                }
+
+                // Update map
+                if (map) {
+                    map.eachLayer(layer => {
+                        if (layer instanceof L.Marker || layer instanceof L.Polyline) {
+                            map.removeLayer(layer);
+                        }
+                    });
+                    const originMarker = L.marker([data.origin.lat, data.origin.lng])
+                        .addTo(map)
+                        .bindPopup(`<b>Origin</b><br>${data.origin.address || `(${data.origin.lat}, ${data.origin.lng})`}`);
+                    const destMarker = L.marker([data.destination.lat, data.destination.lng])
+                        .addTo(map)
+                        .bindPopup(`<b>Destination</b><br>${data.destination.address || `(${data.destination.lat}, ${data.destination.lng})`}`);
+                    const routeCoords = [[data.origin.lat, data.origin.lng]];
+                    data.checkpoints.forEach((cp, index) => {
+                        routeCoords.push([cp.lat, cp.lng]);
+                        let popupContent = `<b>Checkpoint ${index + 1}: ${cp.label}</b><br>` +
+                                          `Location: (${cp.lat.toFixed(4)}, ${cp.lng.toFixed(4)})<br>` +
+                                          `Note: ${cp.note || 'None'}<br>` +
+                                          `Status: ${cp.status || 'None'}<br>` +
+                                          `Timestamp: ${formatTimestamp(cp.timestamp)}`;
+                        if (cp.proof_photo && cp.proof_photo.startsWith('http')) {
+                            popupContent += `<br><a href="${cp.proof_photo}" target="_blank" rel="noopener" class="text-blue-600 hover:underline">View Proof Photo</a>`;
+                        } else if (cp.proof_photo) {
+                            popupContent += `<br><span class="text-red-600">Invalid photo URL</span>`;
+                        }
+                        L.marker([cp.lat, cp.lng]).addTo(map).bindPopup(popupContent);
+                    });
+                    routeCoords.push([data.destination.lat, data.destination.lng]);
+                    L.polyline(routeCoords, { color: 'blue', weight: 4 }).addTo(map);
+                    const bounds = [
+                        [data.origin.lat, data.origin.lng],
+                        [data.destination.lat, data.destination.lng],
+                        ...data.checkpoints.map(cp => [cp.lat, cp.lng])
+                    ];
+                    map.fitBounds(bounds, { padding: [50, 50], maxZoom: 15 });
+                }
+            });
+            socket.on('error', (data) => {
+                console.error('WebSocket error:', data.message);
+                document.getElementById('subscribe-result').textContent = `Real-time update error: ${data.message}`;
+                document.getElementById('subscribe-result').classList.remove('success', 'error');
+                document.getElementById('subscribe-result').classList.add('error');
+                document.getElementById('subscribe-result').classList.remove('hidden');
+            });
+        } catch (e) {
+            console.error('WebSocket initialization failed:', e);
+            document.getElementById('subscribe-result').textContent = 'Failed to connect for real-time updates.';
+            document.getElementById('subscribe-result').classList.remove('success', 'error');
+            document.getElementById('subscribe-result').classList.add('error');
+            document.getElementById('subscribe-result').classList.remove('hidden');
+        }
+        {% endif %}
+
+        // Hamburger Menu Toggle
+        document.querySelector('.menu').addEventListener('click', function() {
+            const menuContent = document.querySelector('.menu-content');
+            menuContent.style.display = menuContent.style.display === 'block' ? 'none' : 'block';
+        });
+        document.addEventListener('click', function(event) {
+            const menu = document.querySelector('.menu');
+            const menuContent = document.querySelector('.menu-content');
+            if (!menu.contains(event.target) && !menuContent.contains(event.target)) {
+                menuContent.style.display = 'none';
+            }
+        });
+    </script>
 </body>
 </html>
