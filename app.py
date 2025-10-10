@@ -1778,4 +1778,47 @@ def telegram_webhook():
             if not shipment:
                 send_message(f"🔍 Shipment {tracking} not found! 😿", chat_id, get_navigation_keyboard())
                 return jsonify({'error': 'Shipment not found'}), 404
-            checkpoints = Checkpoint.query.filter_by(shipment_id=shipment.id).order_by
+            checkpoints = Checkpoint.query.filter_by(shipment_id=shipment.id).order_by(Checkpoint.position)
+            if not checkpoints:
+                send_message(f"📍 No checkpoints found for {tracking}.", chat_id, get_navigation_keyboard())
+                return jsonify({'error': 'No checkpoints found'}), 404
+            first_checkpoint = checkpoints.first()
+            eta = shipment.eta.isoformat() + 'Z' if shipment.eta else 'Not available'
+            distance = shipment.distance_km if shipment.distance_km is not None else 'Calculating...'
+            send_message(
+                f"📦 Shipment {tracking} - {shipment.title}\n"
+                f"Status: {shipment.status}\n"
+                f"Distance: {distance:.2f} km\n"
+                f"ETA: {eta}\n\n"
+                f"📍 Latest Checkpoint:\n"
+                f"- Label: {first_checkpoint.label}\n"
+                f"- Location: ({first_checkpoint.lat}, {first_checkpoint.lng})\n"
+                f"- Note: {first_checkpoint.note or 'None'}\n"
+                f"- Status: {first_checkpoint.status or 'None'}\n"
+                f"- Timestamp: {first_checkpoint.timestamp.isoformat()}Z\n"
+                f"Track: {app.config['APP_BASE_URL']}/track/{tracking}",
+                chat_id,
+                get_navigation_keyboard()
+            )
+            return jsonify({'message': 'Tracked shipment'})
+        elif command == '/admin_login':
+            if not args or len(args) != 1:
+                send_message("🔑 Usage: /admin_login &lt;password&gt;", chat_id)
+                return jsonify({'error': 'Invalid admin login'}), 400
+            password = args[0]
+            if check_password_hash(app.config['ADMIN_PASSWORD_HASH'], password):
+                session = admin_sessions.setdefault(chat_id, {})
+                session['authenticated'] = True
+                session['expires'] = datetime.utcnow() + timedelta(hours=1)
+                send_message("✅ Admin login successful! Welcome back.", chat_id, get_admin_keyboard())
+                logger.info(f"Admin {chat_id} logged in")
+            else:
+                send_message("❌ Invalid password! Access denied.", chat_id)
+                logger.warning(f"Failed admin login attempt for {chat_id}")
+            return jsonify({'message': 'Admin login processed'})
+        else:
+            send_message("❓ Unknown command. Use /track or /admin_login.", chat_id, get_navigation_keyboard())
+            return jsonify({'error': 'Unknown command'}), 400
+    except Exception as e:
+        logger.error(f"Telegram webhook error: {e}")
+        return jsonify({'error': 'Failed to process Telegram update'}, 500)
