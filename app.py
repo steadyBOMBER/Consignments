@@ -1,3 +1,28 @@
+# Add index route for template and Socket.IO compatibility
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+# Restore get_smtp_connection helper function and cache initialization
+def get_smtp_connection():
+    server = smtplib.SMTP(app.config['SMTP_HOST'], app.config['SMTP_PORT'])
+    server.starttls()
+    server.login(app.config['SMTP_USER'], app.config['SMTP_PASS'])
+    return server
+
+# Initialize Flask-Caching
+cache = Cache(app, config={'CACHE_TYPE': 'redis', 'CACHE_REDIS_URL': app.config['REDIS_URL']})
+
+# Import requests for HTTP calls
+import requests
+# Shipment status enum
+from enum import Enum
+class ShipmentStatus(Enum):
+    CREATED = 'Created'
+    IN_TRANSIT = 'In Transit'
+    OUT_FOR_DELIVERY = 'Out for Delivery'
+    DELIVERED = 'Delivered'
+
 import os
 import logging
 import smtplib
@@ -7,127 +32,378 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, render_template, current_app, redirect, url_for
-from flask_jwt_extended import JWTManager, jwt_required, create_access_token
+from flask_jwt_extended import jwt_required, create_access_token
+from flask_limiter import Limiter
+from flask import Flask, request, jsonify, render_template, current_app, redirect, url_for
+from flask_jwt_extended import jwt_required, create_access_token
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from flask_socketio import SocketIO, emit, join_room
 from flask_caching import Cache
-from flask_wtf import FlaskForm, CSRFProtect
-from wtforms import StringField, PasswordField, SubmitField
-from wtforms.validators import DataRequired
-from pydantic import BaseModel, validator, ValidationError
-from typing import Optional as TypingOptional, Dict, List, Union
-from celery import Celery, shared_task
-from retry import retry
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from werkzeug.security import check_password_hash
-from werkzeug.exceptions import HTTPException
-import requests
-from environs import Env
-from math import radians, sin, cos, sqrt, atan2
 from twilio.rest import Client
+from math import radians, sin, cos, sqrt, atan2
+from typing import Dict, Union, Optional as TypingOptional
+from pydantic import BaseModel, validator, ValidationError
+from logging.handlers import RotatingFileHandler
+from celery import Celery, shared_task
+import redis
 import bleach
-from enum import Enum
+try:
+    from retry import retry
+except ImportError:
+    retry = None
+try:
+    from twilio.base.exceptions import TwilioRestException
+except ImportError:
+    TwilioRestException = Exception
 
-# Shipment status enum
-class ShipmentStatus(Enum):
-    CREATED = 'Created'
-    IN_TRANSIT = 'In Transit'
-    OUT_FOR_DELIVERY = 'Out for Delivery'
-    DELIVERED = 'Delivered'
-
-# Environment validation
-env = Env()
-env.read_env()
-
+# Define required_vars if not already defined
 required_vars = [
-    'DATABASE_URL', 'REDIS_URL', 'TELEGRAM_TOKEN', 'ADMIN_PASSWORD_HASH',
-    'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'SMTP_FROM', 'APP_BASE_URL'
+    'SECRET_KEY', 'SQLALCHEMY_DATABASE_URI', 'JWT_SECRET_KEY', 'CELERY_BROKER_URL',
+    'CELERY_RESULT_BACKEND', 'REDIS_URL', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS',
+    'SMTP_FROM', 'APP_BASE_URL'
 ]
+
+
+
+# Initialize Flask app
+app = Flask(__name__, template_folder='templates')
+
+# Configure logging
+handler = RotatingFileHandler('app.log', maxBytes=1000000, backupCount=5)
+handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'))
+app.logger.addHandler(handler)
+app.logger.setLevel(logging.INFO)
+logger = app.logger
+
 for var in required_vars:
-    if not env(var):
+    if not os.getenv(var):
         raise ValueError(f"Missing required environment variable: {var}")
 
-TWILIO_ACCOUNT_SID = env('TWILIO_ACCOUNT_SID', None)
-TWILIO_AUTH_TOKEN = env('TWILIO_AUTH_TOKEN', None)
-TWILIO_PHONE_NUMBER = env('TWILIO_PHONE_NUMBER', None)
-
-# Logging configuration
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.FileHandler('app.log'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
-
-# Flask app setup
-app = Flask(__name__)
-app.config.from_prefixed_env()
-app.config['SQLALCHEMY_DATABASE_URI'] = env('DATABASE_URL').replace('postgresql://', 'postgresql+psycopg://')
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['RATELIMIT_STORAGE_URL'] = env('REDIS_URL')
-app.config['ADMIN_PASSWORD_HASH'] = env('ADMIN_PASSWORD_HASH')
-app.config['TELEGRAM_TOKEN'] = env('TELEGRAM_TOKEN')
-app.config['SMTP_HOST'] = env('SMTP_HOST')
-app.config['SMTP_PORT'] = env.int('SMTP_PORT')
-app.config['SMTP_USER'] = env('SMTP_USER')
-app.config['SMTP_PASS'] = env('SMTP_PASS')
-app.config['SMTP_FROM'] = env('SMTP_FROM')
-app.config['APP_BASE_URL'] = env('APP_BASE_URL')
-app.config['SECRET_KEY'] = env.str('SECRET_KEY', default=os.urandom(24))
-
-socketio = SocketIO(app, async_mode='threading')
-jwt = JWTManager(app)
-csrf = CSRFProtect(app)
-limiter = Limiter(
-    app=app,
-    key_func=get_remote_address,
-    storage_uri=env('REDIS_URL'),
-    default_limits=["200 per day", "50 per hour"]
-)
-limiter.init_app(app)
+# Initialize extensions
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
-cache = Cache(app, config={'CACHE_TYPE': 'redis', 'CACHE_REDIS_URL': env('REDIS_URL')})
-celery = Celery(app.name, broker=env('REDIS_URL'), backend=env('REDIS_URL'))
-celery.conf.update(app.config)
+socketio = SocketIO(app, cors_allowed_origins="*")
+limiter = Limiter(app, key_func=get_remote_address, default_limits=["200 per day", "50 per hour"])
 
-# SMTP connection pool
-smtp_pool = None
+# Initialize Celery
+def make_celery(app):
+    celery = Celery(
+        app.import_name,
+        broker=app.config['CELERY_BROKER_URL'],
+        backend=app.config['CELERY_RESULT_BACKEND']
+    )
+    celery.conf.update(app.config)
+    return celery
 
-def get_smtp_connection():
-    global smtp_pool
-    if smtp_pool is None:
-        smtp_pool = smtplib.SMTP(current_app.config['SMTP_HOST'], current_app.config['SMTP_PORT'], timeout=10)
-        smtp_pool.starttls()
-        smtp_pool.login(current_app.config['SMTP_USER'], current_app.config['SMTP_PASS'])
-    return smtp_pool
+celery = make_celery(app)
 
-# WTForms for CSRF-protected login
-class LoginForm(FlaskForm):
-    password = PasswordField('Password', validators=[DataRequired()])
-    submit = SubmitField('Login')
+# Initialize Redis
+redis_client = redis.Redis.from_url(app.config['REDIS_URL'])
 
-# Anti-Crash: Global exception handlers
-@app.errorhandler(Exception)
-def handle_unhandled_exception(e):
-    logger.error(f"Unhandled exception: {str(e)}", exc_info=True)
-    return render_template('error.html', error='Internal server error'), 500
+# Initialize Twilio
+TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
+TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
+TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER')
 
-@app.errorhandler(HTTPException)
-def handle_http_exception(e):
-    logger.warning(f"HTTP exception: {e.code} - {str(e)}")
-    return render_template('error.html', error=f"{e.code} - {e.name}: {e.description}"), e.code
+# Admin sessions (stored in Redis)
+admin_sessions = {}
+
+
+# Database Models
+
+# Routes
+
+# Celery Tasks
+@shared_task(bind=True, max_retries=3, retry_backoff=2, retry_jitter=True)
+def send_checkpoint_email_async(self, tracking: str, email: str, checkpoint: dict):
+    try:
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = f"Shipment {tracking} Checkpoint Update"
+        msg['From'] = app.config['SMTP_FROM']
+        msg['To'] = email
+
+        text = f"""Shipment Checkpoint Update
+
+Tracking: {tracking}
+Position: {checkpoint['position']}
+Label: {checkpoint['label']}
+Location: ({checkpoint['lat']}, {checkpoint['lng']})
+Note: {checkpoint['note'] or 'None'}
+Status: {checkpoint['status'] or 'None'}
+Timestamp: {checkpoint['timestamp']}
+Track: {app.config['APP_BASE_URL']}/track/{tracking}
+"""
+        if checkpoint.get('proof_photo'):
+            text += f"Proof Photo: {checkpoint['proof_photo']}\n"
+
+        text_part = MIMEText(text, 'plain')
+
+        html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shipment Checkpoint Update</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+</head>
+<body class="bg-gray-100 font-sans">
+    <div class="max-w-2xl mx-auto bg-white shadow-md rounded-lg overflow-hidden">
+        <div class="bg-blue-600 text-white text-center py-4">
+            <img src="{app.config['APP_BASE_URL']}/static/logo.png" alt="Courier Logo" class="h-12 mx-auto" style="max-width: 150px;">
+            <h1 class="text-2xl font-bold mt-2">Shipment Checkpoint Update</h1>
+        </div>
+        <div class="p-6">
+            <h2 class="text-xl font-semibold text-gray-800">Tracking: {tracking}</h2>
+            <div class="mt-4 space-y-2">
+                <p><span class="font-medium text-gray-700">Position:</span> {checkpoint['position']}</p>
+                <p><span class="font-medium text-gray-700">Label:</span> {checkpoint['label']}</p>
+                <p><span class="font-medium text-gray-700">Location:</span> ({checkpoint['lat']}, {checkpoint['lng']})</p>
+                <p><span class="font-medium text-gray-700">Note:</span> {checkpoint['note'] or 'None'}</p>
+                <p><span class="font-medium text-gray-700">Status:</span> {checkpoint['status'] or 'None'}</p>
+                <p><span class="font-medium text-gray-700">Timestamp:</span> <script>document.write(formatTimestamp('{checkpoint['timestamp']}'))</script></p>
+                <!-- Proof Photo: Only shown if available -->
+                {f'<p><span class="font-medium text-gray-700">Proof Photo:</span> <a href="{checkpoint["proof_photo"]}" class="text-blue-600 hover:underline" target="_blank" rel="noopener">View</a></p>' if checkpoint.get('proof_photo') else ''}
+            </div>
+            <div class="mt-6 text-center">
+                <a href="{app.config['APP_BASE_URL']}/track/{tracking}" class="inline-block bg-blue-600 text-white font-semibold py-2 px-4 rounded hover:bg-blue-700">
+                    Track Shipment
+                </a>
+            </div>
+        </div>
+        <div class="bg-gray-200 text-gray-600 text-center py-4 text-sm">
+            <p>&copy; {datetime.now().year} Courier Tracking Service. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+        html_part = MIMEText(html, 'html')
+
+        msg.attach(text_part)
+        msg.attach(html_part)
+
+        @retry(tries=3, delay=2, backoff=2, exceptions=(smtplib.SMTPException, smtplib.SMTPServerDisconnected))
+        def send_email():
+            try:
+                server = get_smtp_connection()
+                server.send_message(msg)
+                logger.info(f"Sent checkpoint email to {email} for shipment {tracking}")
+            except smtplib.SMTPAuthenticationError:
+                logger.error(f"SMTP authentication failed for {email}")
+                raise
+            except smtplib.SMTPConnectError:
+                logger.error(f"SMTP connection failed for {email}")
+                raise
+            except smtplib.SMTPException as e:
+                logger.error(f"SMTP error sending email to {email}: {e}")
+                raise
+
+        send_email()
+    except smtplib.SMTPAuthenticationError:
+        logger.error(f"Authentication error sending checkpoint email to {email}")
+        raise self.retry(exc=Exception("SMTP authentication failed"))
+    except smtplib.SMTPConnectError:
+        logger.error(f"Connection error sending checkpoint email to {email}")
+        raise self.retry(exc=Exception("SMTP server unreachable"))
+    except smtplib.SMTPException as e:
+        logger.error(f"SMTP error sending checkpoint email to {email}: {e}")
+        raise self.retry(exc=e)
+    except Exception as e:
+        logger.error(f"Unexpected error sending checkpoint email to {email}: {e}")
+        raise
+
+@shared_task(bind=True, max_retries=3, retry_backoff=2, retry_jitter=True)
+def send_checkpoint_sms_async(self, tracking: str, phone: str, checkpoint: dict):
+    if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_PHONE_NUMBER):
+        return
+    try:
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        message = client.messages.create(
+            body=f"Shipment {tracking} Update: Checkpoint {checkpoint['position']} ({checkpoint['label']}) at ({checkpoint['lat']}, {checkpoint['lng']}) - {checkpoint['timestamp']}",
+            from_=TWILIO_PHONE_NUMBER,
+            to=phone
+        )
+        logger.info(f"Sent checkpoint SMS to {phone} for shipment {tracking}")
+    except TwilioRestException as e:
+        logger.error(f"Twilio error sending SMS to {phone}: {e}")
+        raise self.retry(exc=e)
+    except Exception as e:
+        logger.error(f"Unexpected error sending SMS to {phone}: {e}")
+        raise
+
+@shared_task(bind=True, max_retries=3, retry_backoff=2, retry_jitter=True)
+def send_tawkto_notification_email_async(self, chat_id: str, visitor_name: str, visitor_email: str, visitor_phone: str, tracking: str):
+    try:
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = f"New Tawk.to Chat Started: {chat_id}"
+        msg['From'] = app.config['SMTP_FROM']
+        msg['To'] = app.config['ADMIN_EMAIL']
+
+        text = f"""New Tawk.to Chat Notification
+
+Chat ID: {chat_id}
+Visitor: {visitor_name}
+Email: {visitor_email}
+Phone: {visitor_phone}
+Tracking Number: {tracking}
+Track: {app.config['APP_BASE_URL']}/track/{tracking}
+"""
+        text_part = MIMEText(text, 'plain')
+
+        html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>New Chat Notification</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+</head>
+<body class="bg-gray-100 font-sans">
+    <div class="max-w-2xl mx-auto bg-white shadow-md rounded-lg overflow-hidden">
+        <div class="bg-blue-600 text-white text-center py-4">
+            <img src="{app.config['APP_BASE_URL']}/static/logo.png" alt="Courier Logo" class="h-12 mx-auto" style="max-width: 150px;">
+            <h1 class="text-2xl font-bold mt-2">New Chat Notification</h1>
+        </div>
+        <div class="p-6">
+            <h2 class="text-xl font-semibold text-gray-800">Chat ID: {chat_id}</h2>
+            <div class="mt-4 space-y-2">
+                <p><span class="font-medium text-gray-700">Visitor:</span> {visitor_name}</p>
+                <p><span class="font-medium text-gray-700">Email:</span> {visitor_email}</p>
+                <p><span class="font-medium text-gray-700">Phone:</span> {visitor_phone}</p>
+                <p><span class="font-medium text-gray-700">Tracking Number:</span> {tracking}</p>
+            </div>
+            <div class="mt-6 text-center">
+                <a href="{app.config['APP_BASE_URL']}/track/{tracking}" class="inline-block bg-blue-600 text-white font-semibold py-2 px-4 rounded hover:bg-blue-700">
+                    Track Shipment
+                </a>
+            </div>
+        </div>
+        <div class="bg-gray-200 text-gray-600 text-center py-4 text-sm">
+            <p>&copy; {datetime.now().year} Courier Tracking Service. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+        html_part = MIMEText(html, 'html')
+
+        msg.attach(text_part)
+        msg.attach(html_part)
+
+        @retry(tries=3, delay=2, backoff=2, exceptions=(smtplib.SMTPException, smtplib.SMTPServerDisconnected))
+        def send_email():
+            try:
+                server = get_smtp_connection()
+                server.send_message(msg)
+                logger.info(f"Sent Tawk.to chat notification email to {app.config['ADMIN_EMAIL']} for chat {chat_id}")
+            except smtplib.SMTPAuthenticationError:
+                logger.error(f"SMTP authentication failed for {app.config['ADMIN_EMAIL']}")
+                raise
+            except smtplib.SMTPConnectError:
+                logger.error(f"SMTP connection failed for {app.config['ADMIN_EMAIL']}")
+                raise
+            except smtplib.SMTPException as e:
+                logger.error(f"SMTP error sending email to {app.config['ADMIN_EMAIL']}: {e}")
+                raise
+
+        send_email()
+    except smtplib.SMTPAuthenticationError:
+        logger.error(f"Authentication error sending Tawk.to notification email to {app.config['ADMIN_EMAIL']}")
+        raise self.retry(exc=Exception("SMTP authentication failed"))
+    except smtplib.SMTPConnectError:
+        logger.error(f"Connection error sending Tawk.to notification email to {app.config['ADMIN_EMAIL']}")
+        raise self.retry(exc=Exception("SMTP server unreachable"))
+    except smtplib.SMTPException as e:
+        logger.error(f"SMTP error sending Tawk.to notification email to {app.config['ADMIN_EMAIL']}: {e}")
+        raise self.retry(exc=e)
+    except Exception as e:
+        logger.error(f"Unexpected error sending Tawk.to notification email to {app.config['ADMIN_EMAIL']}: {e}")
+        raise
+
+@shared_task(bind=True, max_retries=3, retry_backoff=2, retry_jitter=True)
+def send_tawkto_notification_sms_async(self, chat_id: str, visitor_name: str, tracking: str):
+    if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_PHONE_NUMBER):
+        return
+    try:
+        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        message = client.messages.create(
+            body=f"New Tawk.to chat started: {chat_id} by {visitor_name} for tracking {tracking}",
+            from_=TWILIO_PHONE_NUMBER,
+            to=app.config['ADMIN_PHONE']
+        )
+        logger.info(f"Sent Tawk.to chat notification SMS to {app.config['ADMIN_PHONE']} for chat {chat_id}")
+    except TwilioRestException as e:
+        logger.error(f"Twilio error sending Tawk.to notification SMS to {app.config['ADMIN_PHONE']}: {e}")
+        raise self.retry(exc=e)
+    except Exception as e:
+        logger.error(f"Failed to send Tawk.to notification SMS to {app.config['ADMIN_PHONE']}: {e}")
+        raise
+
+# Telegram Helper Functions
+def send_message(text, chat_id, reply_markup=None):
+    import requests
+    url = f"https://api.telegram.org/bot{app.config['TELEGRAM_TOKEN']}/sendMessage"
+    payload = {
+        'chat_id': chat_id,
+        'text': text,
+        'parse_mode': 'HTML'
+    }
+    if reply_markup:
+        payload['reply_markup'] = json.dumps(reply_markup)
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        response.raise_for_status()
+        logger.info(f"Sent Telegram message to {chat_id}: {text}")
+    except requests.RequestException as e:
+        logger.error(f"Failed to send Telegram message to {chat_id}: {e}")
+
+def get_admin_keyboard():
+    return {
+        'keyboard': [
+            [{'text': '/create'}, {'text': '/update'}, {'text': '/list'}]
+        ],
+        'resize_keyboard': True,
+        'one_time_keyboard': True
+    }
+
+def send_checkpoint_notifications(shipment, checkpoint):
+    subscribers = Subscriber.query.filter_by(shipment_id=shipment.id).all()
+    checkpoint_dict = checkpoint.to_dict()
+    for subscriber in subscribers:
+        if subscriber.email:
+            send_checkpoint_email_async.delay(shipment.tracking, subscriber.email, checkpoint_dict)
+        if subscriber.phone and TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_PHONE_NUMBER:
+            send_checkpoint_sms_async.delay(shipment.tracking, subscriber.phone, checkpoint_dict)
+
+# Error Handlers
+@app.errorhandler(400)
+def bad_request(e):
+    return jsonify({'error': e.description}), 400
+
+@app.errorhandler(401)
+def unauthorized(e):
+    return jsonify({'error': e.description}), 401
+
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({'error': e.description}), 404
+
+@app.errorhandler(429)
+def ratelimit_handler(e):
+    return jsonify({'error': 'Rate limit exceeded. Please try again later.'}), 429
 
 @app.errorhandler(500)
-def internal_error(error):
-    logger.error(f"500 Internal Server Error: {str(error)}", exc_info=True)
-    return render_template('error.html', error='Internal server error'), 500
+def internal_error(e):
+    logger.error(f"Internal server error: {e}")
+    return jsonify({'error': 'Internal server error'}), 500
+
+if __name__ == '__main__':
+    socketio.run(app, debug=False)
 
 # Haversine formula for distance calculation
 def haversine(lat1, lon1, lat2, lon2):
@@ -803,15 +1079,15 @@ def health():
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     try:
-        form = LoginForm()
-        if request.method == 'POST' and form.validate_on_submit():
-            if check_password_hash(app.config['ADMIN_PASSWORD_HASH'], form.password.data):
+        if request.method == 'POST':
+            password = request.form.get('password', '')
+            if check_password_hash(app.config['ADMIN_PASSWORD_HASH'], password):
                 access_token = create_access_token(identity='admin')
                 response = redirect(url_for('admin'))
                 response.set_cookie('access_token', access_token, httponly=True, secure=True)
                 return response
-            return render_template('login.html', form=form, error='Invalid password'), 401
-        return render_template('login.html', form=form)
+            return render_template('login.html', error='Invalid password'), 401
+        return render_template('login.html')
     except Exception as e:
         logger.error(f"Login error: {e}")
         return render_template('error.html', error='Login failed'), 400
@@ -1502,473 +1778,4 @@ def telegram_webhook():
             if not shipment:
                 send_message(f"🔍 Shipment {tracking} not found! 😿", chat_id, get_navigation_keyboard())
                 return jsonify({'error': 'Shipment not found'}), 404
-            checkpoints = Checkpoint.query.filter_by(shipment_id=shipment.id).order_by(Checkpoint.position).all()
-            info = (
-                f"📦 Shipment: {shipment.title} ({tracking})\nStatus: {shipment.status}\n"
-f"Origin: {shipment.origin_address or f'({shipment.origin_lat}, {shipment.origin_lng})'}\n"
-f"Destination: {shipment.dest_address or f'({shipment.dest_lat}, {shipment.dest_lng})'}\n"
-f"Distance: {shipment.distance_km:.2f} km\n"
-f"ETA: {shipment.eta.isoformat() + 'Z' if shipment.eta else 'Not set'}\n"
-f"Created: {shipment.created_at.isoformat() + 'Z'}\n"
-f"Checkpoints ({len(checkpoints)}):\n"
-)
-for cp in checkpoints[:5]:  # Limit to 5 checkpoints to avoid message length issues
-info += (
-f"- {cp.label} at ({cp.lat:.4f}, {cp.lng:.4f}) on {cp.timestamp.isoformat() + 'Z'}\n"
-f"  Status: {cp.status or 'N/A'}\n"
-f"  Note: {cp.note or 'None'}\n"
-)
-if len(checkpoints) > 5:
-info += f"... and {len(checkpoints) - 5} more checkpoints.\n"
-info += f"\nTrack online: {current_app.config['APP_BASE_URL']}/track/{tracking}"
-send_message(info, chat_id, get_navigation_keyboard(tracking))
-logger.info(f"User {chat_id} tracked shipment {tracking}")
-return jsonify({'message': 'Shipment tracked'})
-elif command == '/admin_login':
-if not args or not args[0].strip():
-send_message("🔐 Please provide a password! Usage: /admin_login <password>", chat_id, get_navigation_keyboard())
-return jsonify({'error': 'Missing password'}), 400
-password = args[0].strip()
-if check_password_hash(current_app.config['ADMIN_PASSWORD_HASH'], password):
-admin_sessions[chat_id] = {
-'authenticated': True,
-'expires': datetime.utcnow() + timedelta(hours=24),
-'state': {}
-}
-logger.info(f"Admin login successful for chat {chat_id}")
-send_message("🔐 Admin login successful! 🎉 Choose an action:", chat_id, get_admin_keyboard())
-return jsonify({'message': 'Admin login successful'})
-else:
-logger.warning(f"Admin login failed for chat {chat_id}")
-send_message("🔐 Invalid password! 😿", chat_id, get_navigation_keyboard())
-return jsonify({'error': 'Invalid password'}), 401
-session = admin_sessions.get(chat_id, {})
-state = session.get('state', {})
-is_admin = session.get('authenticated') and datetime.utcnow() < session.get('expires', datetime.utcnow())
-if not state:
-send_message("❓ Unknown command or action. Use /start to begin or /admin_login for admin access.", chat_id, get_navigation_keyboard())
-return jsonify({'error': 'Unknown command'}), 400
-if state['command'] == '/create' or state['command'] == '/admin_create_shipment':
-if state['step'] == 'tracking':
-if not text.strip():
-send_message("❌ Tracking number cannot be empty! Try again:", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'error': 'Empty tracking number'}), 400
-state['tracking'] = text.strip()
-state['step'] = 'title'
-admin_sessions[chat_id]['state'] = state
-send_message("📝 Enter shipment title (default: Consignment):", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'message': 'Prompted for title'})
-elif state['step'] == 'title':
-state['title'] = text.strip() or 'Consignment'
-state['step'] = 'origin'
-admin_sessions[chat_id]['state'] = state
-send_message("📍 Enter origin (address or lat,lng):", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'message': 'Prompted for origin'})
-elif state['step'] == 'origin':
-if not text.strip():
-send_message("❌ Origin cannot be empty! Try again:", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'error': 'Empty origin'}), 400
-state['origin'] = text.strip()
-state['step'] = 'destination'
-admin_sessions[chat_id]['state'] = state
-send_message("📍 Enter destination (address or lat,lng):", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'message': 'Prompted for destination'})
-elif state['step'] == 'destination':
-if not text.strip():
-send_message("❌ Destination cannot be empty! Try again:", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'error': 'Empty destination'}), 400
-state['destination'] = text.strip()
-state['step'] = 'status'
-admin_sessions[chat_id]['state'] = state
-send_message(
-"📋 Enter status (Created, In Transit, Out for Delivery, Delivered):",
-chat_id,
-{'inline_keyboard': [[{'text': status.value, 'callback_data': f"select_status|{state['command']}|{state['tracking']}|{status.value}"} for status in ShipmentStatus]]}
-)
-return jsonify({'message': 'Prompted for status'})
-elif state['step'] == 'status' and callback_query:
-parts = callback_query['data'].split('|')
-if parts[0] == 'select_status':
-status = parts[3]
-try:
-data = {
-'tracking_number': state['tracking'],
-'title': state['title'],
-'origin': state['origin'],
-'destination': state['destination'],
-'status': status
-}
-ShipmentCreate(**data)
-if ',' in state['origin'] and all(x.replace('.', '').isdigit() for x in state['origin'].split(',')):
-origin_lat, origin_lng = map(float, state['origin'].split(','))
-origin_address = None
-else:
-coords = geocode_address(state['origin'])
-origin_lat, origin_lng = coords['lat'], coords['lng']
-origin_address = state['origin']
-if ',' in state['destination'] and all(x.replace('.', '').isdigit() for x in state['destination'].split(',')):
-dest_lat, dest_lng = map(float, state['destination'].split(','))
-dest_address = None
-else:
-coords = geocode_address(state['destination'])
-dest_lat, dest_lng = coords['lat'], coords['lng']
-dest_address = state['destination']
-shipment = Shipment(
-tracking=state['tracking'],
-title=state['title'],
-origin_lat=origin_lat,
-origin_lng=origin_lng,
-dest_lat=dest_lat,
-dest_lng=dest_lng,
-origin_address=origin_address,
-dest_address=dest_address,
-status=status
-)
-shipment.calculate_distance_and_eta()
-with db.session.begin():
-db.session.add(shipment)
-db.session.add(StatusHistory(shipment=shipment, status=status))
-socketio.emit('update', shipment.to_dict(), namespace='/', room=shipment.tracking)
-send_message(f"📦 Shipment {state['tracking']} created! 🎉", chat_id, get_admin_keyboard() if is_admin else get_navigation_keyboard())
-admin_sessions[chat_id].pop('state', None)
-logger.info(f"Admin {chat_id} created shipment {state['tracking']}")
-return jsonify({'message': 'Shipment created'})
-except ValidationError as e:
-send_message(f"❌ Validation error: {str(e)}", chat_id, get_admin_keyboard() if is_admin else get_navigation_keyboard())
-admin_sessions[chat_id].pop('state', None)
-return jsonify({'error': str(e)}), 400
-except ValueError as e:
-send_message(f"❌ Geocoding error: {str(e)}", chat_id, get_admin_keyboard() if is_admin else get_navigation_keyboard())
-admin_sessions[chat_id].pop('state', None)
-return jsonify({'error': str(e)}), 400
-except IntegrityError:
-db.session.rollback()
-send_message(f"❌ Tracking number {state['tracking']} already exists!", chat_id, get_admin_keyboard() if is_admin else get_navigation_keyboard())
-admin_sessions[chat_id].pop('state', None)
-return jsonify({'error': 'Tracking number already exists'}), 409
-except SQLAlchemyError as e:
-db.session.rollback()
-logger.error(f"Database error in shipment creation: {e}")
-send_message("💾 Database error! 😿", chat_id, get_admin_keyboard() if is_admin else get_navigation_keyboard())
-admin_sessions[chat_id].pop('state', None)
-return jsonify({'error': 'Database error'}), 500
-elif state['command'] == '/subscribe':
-if state['step'] == 'tracking':
-if not text.strip():
-send_message("❌ Tracking number cannot be empty! Try again:", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'error': 'Empty tracking number'}), 400
-tracking = text.strip()
-shipment = Shipment.query.filter_by(tracking=tracking).first()
-if not shipment:
-send_message(f"🔍 Shipment {tracking} not found! 😿", chat_id, get_navigation_keyboard())
-admin_sessions[chat_id].pop('state', None)
-return jsonify({'error': 'Shipment not found'}), 404
-state['tracking'] = tracking
-state['step'] = 'contact'
-admin_sessions[chat_id]['state'] = state
-send_message("📩 Enter email or phone number to subscribe:", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'message': 'Prompted for contact'})
-elif state['step'] == 'contact':
-if not text.strip():
-send_message("❌ Contact cannot be empty! Try again:", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'error': 'Empty contact'}), 400
-contact = text.strip()
-shipment = Shipment.query.filter_by(tracking=state['tracking']).first()
-if not shipment:
-send_message(f"🔍 Shipment {state['tracking']} not found! 😿", chat_id, get_navigation_keyboard())
-admin_sessions[chat_id].pop('state', None)
-return jsonify({'error': 'Shipment not found'}), 404
-try:
-email = contact if '@' in contact else None
-phone = contact if contact.replace('+', '').replace('-', '').isdigit() else None
-if not email and not phone:
-send_message("❌ Invalid email or phone number! Try again:", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'error': 'Invalid contact'}), 400
-subscriber = Subscriber(shipment_id=shipment.id, email=email or '', phone=phone or None)
-with db.session.begin():
-db.session.add(subscriber)
-send_message(f"📩 Subscribed {contact} to {state['tracking']}!", chat_id, get_navigation_keyboard(state['tracking']))
-admin_sessions[chat_id].pop('state', None)
-logger.info(f"User {chat_id} subscribed {contact} to {state['tracking']}")
-return jsonify({'message': 'Subscribed successfully'})
-except IntegrityError:
-db.session.rollback()
-send_message(f"❌ {contact} already subscribed to {state['tracking']}!", chat_id, get_navigation_keyboard(state['tracking']))
-admin_sessions[chat_id].pop('state', None)
-return jsonify({'error': 'Already subscribed'}), 409
-except SQLAlchemyError as e:
-db.session.rollback()
-logger.error(f"Database error in subscription: {e}")
-send_message("💾 Database error! 😿", chat_id, get_navigation_keyboard())
-admin_sessions[chat_id].pop('state', None)
-return jsonify({'error': 'Database error'}), 500
-elif state['command'] == '/addcp':
-if state['step'] == 'tracking':
-if not text.strip():
-send_message("❌ Tracking number cannot be empty! Try again:", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'error': 'Empty tracking number'}), 400
-tracking = text.strip()
-shipment = Shipment.query.filter_by(tracking=tracking).first()
-if not shipment:
-send_message(f"🔍 Shipment {tracking} not found! 😿", chat_id, get_navigation_keyboard())
-admin_sessions[chat_id].pop('state', None)
-return jsonify({'error': 'Shipment not found'}), 404
-state['tracking'] = tracking
-state['step'] = 'location'
-admin_sessions[chat_id]['state'] = state
-send_message("📍 Enter location (address or lat,lng):", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'message': 'Prompted for location'})
-elif state['step'] == 'location':
-if not text.strip():
-send_message("❌ Location cannot be empty! Try again:", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'error': 'Empty location'}), 400
-state['location'] = text.strip()
-state['step'] = 'label'
-admin_sessions[chat_id]['state'] = state
-send_message("📝 Enter checkpoint label:", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'message': 'Prompted for label'})
-elif state['step'] == 'label':
-if not text.strip():
-send_message("❌ Label cannot be empty! Try again:", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'error': 'Empty label'}), 400
-state['label'] = text.strip()
-state['step'] = 'note'
-admin_sessions[chat_id]['state'] = state
-send_message("📝 Enter note (optional, press Cancel to skip):", chat_id, {'inline_keyboard': [[{'text': 'Skip', 'callback_data': f"skip_note|{state['tracking']}"}, {'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'message': 'Prompted for note'})
-elif state['step'] == 'note' and (text.strip() or callback_query.get('data') == f"skip_note|{state['tracking']}"):
-state['note'] = text.strip() if text.strip() else None
-state['step'] = 'status'
-admin_sessions[chat_id]['state'] = state
-send_message(
-"📋 Enter status (optional, choose one or skip):",
-chat_id,
-{'inline_keyboard': [
-[{'text': status.value, 'callback_data': f"select_status|/addcp|{state['tracking']}|{status.value}"} for status in ShipmentStatus],
-[{'text': 'Skip', 'callback_data': f"skip_status|{state['tracking']}"}]
-]}
-)
-return jsonify({'message': 'Prompted for status'})
-elif state['step'] == 'status' and callback_query:
-parts = callback_query['data'].split('|')
-if parts[0] in ['select_status', 'skip_status']:
-status = parts[3] if parts[0] == 'select_status' else None
-try:
-shipment = Shipment.query.filter_by(tracking=state['tracking']).first()
-if not shipment:
-send_message(f"🔍 Shipment {state['tracking']} not found! 😿", chat_id, get_navigation_keyboard())
-admin_sessions[chat_id].pop('state', None)
-return jsonify({'error': 'Shipment not found'}), 404
-data = {
-'address': state['location'] if ',' not in state['location'] else None,
-'lat': float(state['location'].split(',')[0]) if ',' in state['location'] and all(x.replace('.', '').isdigit() for x in state['location'].split(',')) else None,
-'lng': float(state['location'].split(',')[1]) if ',' in state['location'] and all(x.replace('.', '').isdigit() for x in state['location'].split(',')) else None,
-'label': state['label'],
-'note': state['note'],
-'status': status
-}
-CheckpointCreate(**data)
-if data['address']:
-coords = geocode_address(data['address'])
-lat, lng = coords['lat'], coords['lng']
-else:
-lat, lng = data['lat'], data['lng']
-position = db.session.query(db.func.max(Checkpoint.position)).filter_by(shipment_id=shipment.id).scalar() or 0
-checkpoint = Checkpoint(
-shipment_id=shipment.id,
-position=position + 1,
-lat=lat,
-lng=lng,
-label=data['label'],
-note=data['note'],
-status=data['status']
-)
-with db.session.begin():
-db.session.add(checkpoint)
-if data['status']:
-shipment.status = data['status']
-db.session.add(StatusHistory(shipment=shipment, status=data['status']))
-if shipment.status == ShipmentStatus.DELIVERED.value:
-shipment.eta = checkpoint.timestamp
-socketio.emit('update', shipment.to_dict(), namespace='/', room=state['tracking'])
-for subscriber in shipment.subscribers:
-if subscriber.is_active:
-send_checkpoint_email_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.email)
-if subscriber.phone:
-send_checkpoint_sms_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.phone)
-send_message(f"📍 Checkpoint added to {state['tracking']}!", chat_id, get_navigation_keyboard(state['tracking']))
-admin_sessions[chat_id].pop('state', None)
-logger.info(f"User {chat_id} added checkpoint to {state['tracking']}")
-return jsonify({'message': 'Checkpoint added'})
-except ValidationError as e:
-send_message(f"❌ Validation error: {str(e)}", chat_id, get_navigation_keyboard())
-admin_sessions[chat_id].pop('state', None)
-return jsonify({'error': str(e)}), 400
-except ValueError as e:
-send_message(f"❌ Geocoding error: {str(e)}", chat_id, get_navigation_keyboard())
-admin_sessions[chat_id].pop('state', None)
-return jsonify({'error': str(e)}), 400
-except SQLAlchemyError as e:
-db.session.rollback()
-logger.error(f"Database error in checkpoint creation: {e}")
-send_message("💾 Database error! 😿", chat_id, get_navigation_keyboard())
-admin_sessions[chat_id].pop('state', None)
-return jsonify({'error': 'Database error'}), 500
-elif state['command'] == '/simulate':
-if state['step'] == 'tracking':
-if not text.strip():
-send_message("❌ Tracking number cannot be empty! Try again:", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'error': 'Empty tracking number'}), 400
-tracking = text.strip()
-shipment = Shipment.query.filter_by(tracking=tracking).first()
-if not shipment:
-send_message(f"🔍 Shipment {tracking} not found! 😿", chat_id, get_navigation_keyboard())
-admin_sessions[chat_id].pop('state', None)
-return jsonify({'error': 'Shipment not found'}), 404
-if shipment.status == ShipmentStatus.DELIVERED.value:
-send_message(f"❌ Shipment {tracking} already delivered!", chat_id, get_navigation_keyboard())
-admin_sessions[chat_id].pop('state', None)
-return jsonify({'error': 'Shipment already delivered'}), 400
-simulation_state = SimulationState.query.filter_by(shipment_id=shipment.id).first()
-if simulation_state and simulation_state.status == 'running':
-send_message(f"❌ Simulation already running for {tracking}!", chat_id, get_navigation_keyboard())
-admin_sessions[chat_id].pop('state', None)
-return jsonify({'error': 'Simulation already running'}), 400
-state['tracking'] = tracking
-state['step'] = 'num_points'
-admin_sessions[chat_id]['state'] = state
-send_message("📍 Enter number of waypoints (2-10):", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'message': 'Prompted for num_points'})
-elif state['step'] == 'num_points':
-if not text.strip().isdigit() or not 2 <= int(text.strip()) <= 10:
-send_message("❌ Number of waypoints must be between 2 and 10! Try again:", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'error': 'Invalid number of waypoints'}), 400
-state['num_points'] = int(text.strip())
-state['step'] = 'step_hours'
-admin_sessions[chat_id]['state'] = state
-send_message("⏰ Enter step hours (1-24):", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'message': 'Prompted for step_hours'})
-elif state['step'] == 'step_hours':
-if not text.strip().isdigit() or not 1 <= int(text.strip()) <= 24:
-send_message("❌ Step hours must be between 1 and 24! Try again:", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'error': 'Invalid step hours'}), 400
-try:
-shipment = Shipment.query.filter_by(tracking=state['tracking']).first()
-if not shipment:
-send_message(f"🔍 Shipment {state['tracking']} not found! 😿", chat_id, get_navigation_keyboard())
-admin_sessions[chat_id].pop('state', None)
-return jsonify({'error': 'Shipment not found'}), 404
-run_simulation_async.delay(shipment.id, state['num_points'], int(text.strip()))
-send_message(f"🚚 Simulation started for {state['tracking']}!", chat_id, get_navigation_keyboard(state['tracking']))
-admin_sessions[chat_id].pop('state', None)
-logger.info(f"User {chat_id} started simulation for {state['tracking']}")
-return jsonify({'message': 'Simulation started'})
-except SQLAlchemyError as e:
-db.session.rollback()
-logger.error(f"Database error in simulation creation: {e}")
-send_message("💾 Database error! 😿", chat_id, get_navigation_keyboard())
-admin_sessions[chat_id].pop('state', None)
-return jsonify({'error': 'Database error'}), 500
-elif state['command'] == '/track_multiple':
-if state['step'] == 'tracking_list':
-if not text.strip():
-send_message("❌ Tracking numbers cannot be empty! Try again:", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'error': 'Empty tracking numbers'}), 400
-tracking_list = [tn.strip() for tn in text.split(',') if tn.strip()]
-if not tracking_list:
-send_message("❌ No valid tracking numbers provided! Try again:", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'error': 'No valid tracking numbers'}), 400
-try:
-shipments = []
-for tn in tracking_list:
-shipment = Shipment.query.filter_by(tracking=tn).first()
-if shipment:
-shipments.append(shipment)
-if not shipments:
-send_message("🔍 No shipments found for provided tracking numbers! 😿", chat_id, get_navigation_keyboard())
-admin_sessions[chat_id].pop('state', None)
-return jsonify({'error': 'No shipments found'}), 404
-info = [f"{s.tracking}: {s.title} - Status: {s.status}" for s in shipments]
-send_message(
-f"📦 Tracked Shipments ({len(shipments)}):\n" + "\n".join(info) + f"\n\nView details: {current_app.config['APP_BASE_URL']}/track_multiple",
-chat_id,
-get_navigation_keyboard()
-)
-admin_sessions[chat_id].pop('state', None)
-logger.info(f"User {chat_id} tracked multiple shipments: {', '.join(tracking_list)}")
-return jsonify({'message': 'Tracked multiple shipments'})
-except SQLAlchemyError as e:
-logger.error(f"Database error in track multiple: {e}")
-send_message("💾 Database error! 😿", chat_id, get_navigation_keyboard())
-admin_sessions[chat_id].pop('state', None)
-return jsonify({'error': 'Database error'}), 500
-elif state['command'] == '/admin_unsubscribe':
-if state['step'] == 'contact':
-if not text.strip():
-send_message("❌ Contact cannot be empty! Try again:", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-return jsonify({'error': 'Empty contact'}), 400
-contact = text.strip()
-shipment = Shipment.query.filter_by(tracking=state['tracking']).first()
-if not shipment:
-send_message(f"🔍 Shipment {state['tracking']} not found! 😿", chat_id, get_admin_keyboard())
-admin_sessions[chat_id].pop('state', None)
-return jsonify({'error': 'Shipment not found'}), 404
-try:
-subscriber = Subscriber.query.filter_by(shipment_id=shipment.id).filter((Subscriber.email == contact) | (Subscriber.phone == contact)).first()
-if not subscriber:
-send_message(f"❌ {contact} not subscribed to {state['tracking']}!", chat_id, get_admin_keyboard())
-admin_sessions[chat_id].pop('state', None)
-return jsonify({'error': 'Subscriber not found'}), 404
-with db.session.begin():
-subscriber.is_active = False
-send_message(f"📩 {contact} unsubscribed from {state['tracking']}!", chat_id, get_admin_keyboard())
-admin_sessions[chat_id].pop('state', None)
-logger.info(f"Admin {chat_id} unsubscribed {contact} from {state['tracking']}")
-return jsonify({'message': 'Unsubscribed successfully'})
-except SQLAlchemyError as e:
-db.session.rollback()
-logger.error(f"Database error in unsubscribe: {e}")
-send_message("💾 Database error! 😿", chat_id, get_admin_keyboard())
-admin_sessions[chat_id].pop('state', None)
-return jsonify({'error': 'Database error'}), 500
-else:
-send_message("❓ Unknown command or action. Use /start to begin or /admin_login for admin access.", chat_id, get_navigation_keyboard())
-return jsonify({'error': 'Unknown command'}), 400
-except Exception as e:
-logger.error(f"Telegram webhook error: {e}")
-if 'chat_id' in locals():
-send_message("😿 Something went wrong! Try again later.", chat_id, get_navigation_keyboard())
-return jsonify({'error': 'Internal server error'}), 500
-Unsubscribe route
-@app.route('/unsubscribe/<tracking>', methods=['GET'])
-def unsubscribe(tracking):
-try:
-tracking = bleach.clean(tracking.strip())
-email = bleach.clean(request.args.get('email', '').strip())
-if not email:
-return render_template('error.html', error='Email is required to unsubscribe'), 400
-shipment = Shipment.query.filter_by(tracking=tracking).first()
-if not shipment:
-return render_template('error.html', error='Shipment not found'), 404
-subscriber = Subscriber.query.filter_by(shipment_id=shipment.id, email=email).first()
-if not subscriber:
-return render_template('error.html', error='Subscription not found'), 404
-with db.session.begin():
-subscriber.is_active = False
-return render_template('unsubscribe.html', message=f"Successfully unsubscribed {email} from {tracking}")
-except SQLAlchemyError as e:
-db.session.rollback()
-logger.error(f"Database error in unsubscribe: {e}")
-return render_template('error.html', error='Database error'), 500
-except Exception as e:
-logger.error(f"Unsubscribe error for {tracking}: {e}")
-return render_template('error.html', error='Failed to unsubscribe'), 500
-Main entry point
-if name == 'main':
-try:
-with app.app_context():
-db.create_all()
-socketio.run(app, debug=app.config.get('DEBUG', False))
-except Exception as e:
-logger.error(f"Application startup error: {e}")
-raise
+            checkpoints = Checkpoint.query.filter_by(shipment_id=shipment.id).order_by
