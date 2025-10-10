@@ -1,5 +1,3 @@
-
-# --- Flask app initialization moved to the top ---
 import os
 import logging
 import smtplib
