@@ -3,6 +3,23 @@ from flask import request, current_app, jsonify
 from app import app, db, Shipment, Subscriber, SimulationState, logger, socketio, admin_sessions, celery
 import requests
 from datetime import datetime, timedelta
+import boto3
+from botocore.exceptions import ClientError
+import os
+from werkzeug.utils import secure_filename
+from PIL import Image
+from io import BytesIO
+import bleach
+from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from werkzeug.security import check_password_hash
+from enum import Enum
+
+class ShipmentStatus(Enum):
+    CREATED = "Created"
+    IN_TRANSIT = "In Transit"
+    OUT_FOR_DELIVERY = "Out for Delivery"
+    DELIVERED = "Delivered"
 
 @app.route('/telegram/webhook', methods=['POST'])
 def telegram_webhook():
@@ -35,6 +52,69 @@ def telegram_webhook():
                 logger.info(f"Sent {'edited' if edit_message_id else 'new'} message to chat {chat_id}: '{text}'")
             except requests.RequestException as e:
                 logger.error(f"Telegram message to {chat_id} failed: {e}")
+
+        def compress_image(file_content, max_size=(800, 800), quality=85, max_file_size=2 * 1024 * 1024):
+            """
+            Compress an image to reduce file size while maintaining quality.
+            Args:
+                file_content: Bytes of the image.
+                max_size: Tuple of (width, height) for resizing.
+                quality: JPEG quality (1-100).
+                max_file_size: Maximum file size in bytes (2MB).
+            Returns:
+                Compressed image bytes or raises ValueError.
+            """
+            try:
+                img = Image.open(BytesIO(file_content))
+                if img.format not in ['JPEG', 'PNG']:
+                    raise ValueError("Only JPEG or PNG images are supported")
+                # Convert PNG to RGB if needed (JPEG doesn't support RGBA)
+                if img.mode in ('RGBA', 'P'):
+                    img = img.convert('RGB')
+                # Resize image while preserving aspect ratio
+                img.thumbnail(max_size, Image.Resampling.LANCZOS)
+                # Save to BytesIO with compression
+                output = BytesIO()
+                img.save(output, format='JPEG', quality=quality, optimize=True)
+                compressed_content = output.getvalue()
+                if len(compressed_content) > max_file_size:
+                    raise ValueError(f"Compressed image size ({len(compressed_content)} bytes) exceeds {max_file_size} bytes")
+                logger.debug(f"Compressed image from {len(file_content)} to {len(compressed_content)} bytes")
+                return compressed_content
+            except Exception as e:
+                logger.error(f"Image compression failed: {e}")
+                raise ValueError(f"Failed to compress image: {str(e)}")
+
+        def upload_to_s3(file_content, filename):
+            try:
+                s3_client = boto3.client(
+                    's3',
+                    aws_access_key_id=current_app.config.get('AWS_ACCESS_KEY_ID'),
+                    aws_secret_access_key=current_app.config.get('AWS_SECRET_ACCESS_KEY')
+                )
+                bucket = current_app.config.get('S3_BUCKET')
+                key = f"proof_photos/{secure_filename(filename)}"
+                s3_client.put_object(Bucket=bucket, Key=key, Body=file_content, ContentType='image/jpeg')
+                url = f"https://{bucket}.s3.amazonaws.com/{key}"
+                logger.info(f"Uploaded photo to S3: {url}")
+                return url
+            except ClientError as e:
+                logger.error(f"S3 upload failed: {e}")
+                return None
+
+        def save_locally(file_content, filename):
+            try:
+                upload_dir = os.path.join(current_app.config.get('UPLOAD_FOLDER', 'uploads'), 'proof_photos')
+                os.makedirs(upload_dir, exist_ok=True)
+                file_path = os.path.join(upload_dir, secure_filename(filename))
+                with open(file_path, 'wb') as f:
+                    f.write(file_content)
+                url = f"{current_app.config['APP_BASE_URL']}/{file_path}"
+                logger.info(f"Saved photo locally: {url}")
+                return url
+            except Exception as e:
+                logger.error(f"Local file save failed: {e}")
+                return None
 
         def get_navigation_keyboard(tracking=None):
             buttons = [
@@ -162,74 +242,31 @@ def telegram_webhook():
                     send_message(f"📋 Enter status (Created, In Transit, Out for Delivery, Delivered) for {tracking} (or press Cancel):", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
                     admin_sessions[chat_id] = session
                     return jsonify({'message': 'Prompted status'})
-                elif state['step'] == 'status':
+                elif state['step'] == 'status' and state['command'] in ['/create', '/admin_create_shipment']:
                     status = bleach.clean(text)
                     tracking = state['tracking']
                     title = state['title']
                     origin = state['origin']
                     destination = state['destination']
                     if status not in [s.value for s in ShipmentStatus]:
-                        send_message(f"🚫 Invalid status! Use: {', '.join(s.value for s in ShipmentStatus)} (or press Cancel)", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-                        return jsonify({'error': 'Invalid status'})
-                    session.pop('state', None)
-                    admin_sessions[chat_id] = session
-                    data = {
-                        'tracking_number': tracking,
-                        'title': title,
-                        'origin': origin,
-                        'destination': destination,
-                        'status': status
-                    }
-                    try:
-                        ShipmentCreate(**data)
-                        if ',' in origin and all(x.replace('.', '').isdigit() for x in origin.split(',')):
-                            origin_lat, origin_lng = map(float, origin.split(','))
-                            origin_address = None
-                        else:
-                            coords = geocode_address(origin)
-                            origin_lat, origin_lng = coords['lat'], coords['lng']
-                            origin_address = origin
-                        if ',' in destination and all(x.replace('.', '').isdigit() for x in destination.split(',')):
-                            dest_lat, dest_lng = map(float, destination.split(','))
-                            dest_address = None
-                        else:
-                            coords = geocode_address(destination)
-                            dest_lat, dest_lng = coords['lat'], coords['lng']
-                            dest_address = destination
-                        shipment = Shipment(
-                            tracking=tracking,
-                            title=title,
-                            origin_lat=origin_lat,
-                            origin_lng=origin_lng,
-                            dest_lat=dest_lat,
-                            dest_lng=dest_lng,
-                            origin_address=origin_address,
-                            dest_address=dest_address,
-                            status=status
+                        send_message(
+                            f"🚫 Invalid status! Use: {', '.join(s.value for s in ShipmentStatus)} (or press Cancel)",
+                            chat_id,
+                            {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
                         )
-                        shipment.calculate_distance_and_eta()
-                        with db.session.begin():
-                            db.session.add(shipment)
-                            db.session.add(StatusHistory(shipment=shipment, status=status))
-                        socketio.emit('update', shipment.to_dict(), namespace='/', room=shipment.tracking)
-                        send_message(f"📦 Shipment {tracking} created successfully! 🔍", chat_id, get_navigation_keyboard(tracking))
-                        logger.info(f"Shipment {tracking} created via Telegram by chat {chat_id}")
-                        return jsonify({'message': 'Shipment created'})
-                    except ValidationError as e:
-                        send_message(f"🚫 Error: {str(e)} (or press Cancel)", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-                        return jsonify({'error': str(e)}), 400
-                    except ValueError as e:
-                        send_message(f"🚫 Error: {str(e)} (or press Cancel)", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-                        return jsonify({'error': str(e)}), 400
-                    except IntegrityError:
-                        db.session.rollback()
-                        send_message(f"🚫 Tracking {tracking} already exists! (or press Cancel)", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-                        return jsonify({'error': 'Tracking number already exists'}), 409
-                    except SQLAlchemyError as e:
-                        db.session.rollback()
-                        logger.error(f"Database error in Telegram shipment creation: {e}")
-                        send_message(f"💾 Database error! (or press Cancel)", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
-                        return jsonify({'error': 'Database error'}), 500
+                        return jsonify({'error': 'Invalid status'})
+                    session['state']['step'] = 'photo'
+                    session['state']['status'] = status
+                    send_message(
+                        f"📸 Upload a proof photo for {tracking} (or press Skip/Cancel):",
+                        chat_id,
+                        {'inline_keyboard': [
+                            [{'text': 'Skip', 'callback_data': f'skip_photo|/addcp|{tracking}'}],
+                            [{'text': 'Cancel', 'callback_data': '/cancel'}]
+                        ]}
+                    )
+                    admin_sessions[chat_id] = session
+                    return jsonify({'message': 'Prompted photo'})
                 elif state['step'] == 'contact':
                     contact = bleach.clean(text)
                     tracking = state['tracking']
@@ -242,34 +279,58 @@ def telegram_webhook():
                         email = None
                         phone = contact
                     if not email and not phone:
-                        send_message(f"🚫 Email or phone required for {tracking} (or press Cancel)", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
+                        send_message(
+                            f"🚫 Email or phone required for {tracking} (or press Cancel)",
+                            chat_id,
+                            {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
+                        )
                         return jsonify({'error': 'Email or phone required'}), 400
                     shipment = Shipment.query.filter_by(tracking=tracking).first()
                     if not shipment:
-                        send_message(f"🔍 Shipment {tracking} not found! (or press Cancel)", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
+                        send_message(
+                            f"🔍 Shipment {tracking} not found! (or press Cancel)",
+                            chat_id,
+                            {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
+                        )
                         return jsonify({'error': 'Shipment not found'}), 404
                     subscriber = Subscriber(shipment_id=shipment.id, email=email, phone=phone)
                     try:
                         with db.session.begin():
                             db.session.add(subscriber)
-                        send_message(f"📩 Subscribed {contact} to {tracking} successfully! 🔍", chat_id, get_navigation_keyboard(tracking))
+                        send_message(
+                            f"📩 Subscribed {contact} to {tracking} successfully! 🔍",
+                            chat_id,
+                            get_navigation_keyboard(tracking)
+                        )
                         logger.info(f"Subscribed {contact} to {tracking} via Telegram by chat {chat_id}")
                         return jsonify({'message': 'Subscribed'})
                     except IntegrityError:
                         db.session.rollback()
-                        send_message(f"🚫 Already subscribed {contact} to {tracking}! (or press Cancel)", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
+                        send_message(
+                            f"🚫 Already subscribed {contact} to {tracking}! (or press Cancel)",
+                            chat_id,
+                            {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
+                        )
                         return jsonify({'error': 'Already subscribed'}), 409
                     except SQLAlchemyError as e:
                         db.session.rollback()
                         logger.error(f"Database error in Telegram subscription: {e}")
-                        send_message(f"💾 Database error! (or press Cancel)", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
+                        send_message(
+                            f"💾 Database error! (or press Cancel)",
+                            chat_id,
+                            {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
+                        )
                         return jsonify({'error': 'Database error'}), 500
                 elif state['step'] == 'location':
                     location = bleach.clean(text)
                     tracking = state['tracking']
                     session['state']['step'] = 'label'
                     session['state']['location'] = location
-                    send_message(f"📍 Enter label for {tracking} (or press Cancel):", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
+                    send_message(
+                        f"📍 Enter label for {tracking} (or press Cancel):",
+                        chat_id,
+                        {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
+                    )
                     admin_sessions[chat_id] = session
                     return jsonify({'message': 'Prompted label'})
                 elif state['step'] == 'label':
@@ -278,4 +339,681 @@ def telegram_webhook():
                     location = state['location']
                     session['state']['step'] = 'note'
                     session['state']['label'] = label
-                    send_message(f"📝 Enter note for {tracking} (optional, or press Cancel):", chat_id, {'inline_keyboard
+                    send_message(
+                        f"📝 Enter note for {tracking} (optional, or press Cancel):",
+                        chat_id,
+                        {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
+                    )
+                    admin_sessions[chat_id] = session
+                    return jsonify({'message': 'Prompted note'})
+                elif state['step'] == 'note':
+                    note = bleach.clean(text) or None
+                    tracking = state['tracking']
+                    location = state['location']
+                    label = state['label']
+                    session['state']['step'] = 'status'
+                    session['state']['note'] = note
+                    send_message(
+                        f"📋 Enter status (optional: Created, In Transit, Out for Delivery, Delivered) for {tracking} (or press Skip/Cancel):",
+                        chat_id,
+                        {'inline_keyboard': [
+                            [{'text': 'Skip', 'callback_data': f'skip_status|/addcp|{tracking}'}],
+                            [{'text': 'Cancel', 'callback_data': '/cancel'}]
+                        ]}
+                    )
+                    admin_sessions[chat_id] = session
+                    return jsonify({'message': 'Prompted status'})
+                elif state['step'] == 'status':
+                    status = bleach.clean(text) or None
+                    tracking = state['tracking']
+                    location = state['location']
+                    label = state['label']
+                    note = state['note']
+                    if status and status not in [s.value for s in ShipmentStatus]:
+                        send_message(
+                            f"🚫 Invalid status! Use: {', '.join(s.value for s in ShipmentStatus)} (or press Cancel)",
+                            chat_id,
+                            {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
+                        )
+                        return jsonify({'error': 'Invalid status'})
+                    session['state']['step'] = 'photo'
+                    session['state']['status'] = status
+                    send_message(
+                        f"📸 Upload a proof photo for {tracking} (or press Skip/Cancel):",
+                        chat_id,
+                        {'inline_keyboard': [
+                            [{'text': 'Skip', 'callback_data': f'skip_photo|/addcp|{tracking}'}],
+                            [{'text': 'Cancel', 'callback_data': '/cancel'}]
+                        ]}
+                    )
+                    admin_sessions[chat_id] = session
+                    return jsonify({'message': 'Prompted photo'})
+                elif state['step'] == 'photo':
+                    if 'photo' not in message or not message['photo']:
+                        send_message(
+                            f"🚫 Please upload a photo for {state['tracking']} (or press Skip/Cancel):",
+                            chat_id,
+                            {'inline_keyboard': [
+                                [{'text': 'Skip', 'callback_data': f'skip_photo|/addcp|{state['tracking']}'}],
+                                [{'text': 'Cancel', 'callback_data': '/cancel'}]
+                            ]}
+                        )
+                        return jsonify({'error': 'No photo provided'}), 400
+                    tracking = state['tracking']
+                    location = state['location']
+                    label = state['label']
+                    note = state['note']
+                    status = state.get('status')
+                    session.pop('state', None)
+                    admin_sessions[chat_id] = session
+                    # Get the highest quality photo (last in the photo array)
+                    photo = message['photo'][-1]
+                    file_id = photo['file_id']
+                    file_size = photo['file_size']
+                    if file_size > 10 * 1024 * 1024:  # 10MB limit
+                        send_message(
+                            f"🚫 Photo too large (max 10MB)! Try again or press Cancel.",
+                            chat_id,
+                            {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
+                        )
+                        return jsonify({'error': 'Photo too large'}), 400
+                    try:
+                        # Get file path from Telegram
+                        response = requests.get(
+                            f"https://api.telegram.org/bot{current_app.config['TELEGRAM_TOKEN']}/getFile",
+                            params={'file_id': file_id},
+                            timeout=5
+                        )
+                        response.raise_for_status()
+                        file_path = response.json()['result']['file_path']
+                        # Download the photo
+                        file_url = f"https://api.telegram.org/file/bot{current_app.config['TELEGRAM_TOKEN']}/{file_path}"
+                        file_response = requests.get(file_url, timeout=10)
+                        file_response.raise_for_status()
+                        file_content = file_response.content
+                        # Compress the photo
+                        try:
+                            compressed_content = compress_image(file_content, max_size=(800, 800), quality=85)
+                        except ValueError as e:
+                            send_message(
+                                f"🚫 {str(e)} Try again or press Cancel.",
+                                chat_id,
+                                {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
+                            )
+                            return jsonify({'error': str(e)}), 400
+                        # Generate a unique filename
+                        filename = f"{tracking}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.jpg"
+                        # Try S3 upload first, fall back to local storage
+                        photo_url = upload_to_s3(compressed_content, filename)
+                        if not photo_url:
+                            photo_url = save_locally(compressed_content, filename)
+                        if not photo_url:
+                            send_message(
+                                f"🚫 Failed to store photo! (or press Cancel)",
+                                chat_id,
+                                {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
+                            )
+                            return jsonify({'error': 'Photo storage failed'}), 500
+                        shipment = Shipment.query.filter_by(tracking=tracking).first()
+                        if not shipment:
+                            send_message(
+                                f"🔍 Shipment {tracking} not found! (or press Cancel)",
+                                chat_id,
+                                {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
+                            )
+                            return jsonify({'error': 'Shipment not found'}), 404
+                        try:
+                            checkpoint_data = {
+                                'address': location if ',' not in location else None,
+                                'lat': float(location.split(',')[0]) if ',' in location and all(x.replace('.', '').isdigit() for x in location.split(',')) else None,
+                                'lng': float(location.split(',')[1]) if ',' in location and all(x.replace('.', '').isdigit() for x in location.split(',')) else None,
+                                'label': label,
+                                'note': note,
+                                'status': status,
+                                'proof_photo': photo_url
+                            }
+                            CheckpointCreate(**checkpoint_data)
+                            if checkpoint_data['address']:
+                                coords = geocode_address(checkpoint_data['address'])
+                                lat, lng = coords['lat'], coords['lng']
+                            else:
+                                lat, lng = checkpoint_data['lat'], checkpoint_data['lng']
+                            position = db.session.query(db.func.max(Checkpoint.position)).filter_by(shipment_id=shipment.id).scalar() or 0
+                            checkpoint = Checkpoint(
+                                shipment_id=shipment.id,
+                                position=position + 1,
+                                lat=lat,
+                                lng=lng,
+                                label=label,
+                                note=note,
+                                status=status,
+                                proof_photo=photo_url
+                            )
+                            with db.session.begin():
+                                db.session.add(checkpoint)
+                                if status:
+                                    shipment.status = status
+                                    db.session.add(StatusHistory(shipment=shipment, status=status))
+                                    if shipment.status == ShipmentStatus.DELIVERED.value:
+                                        shipment.eta = checkpoint.timestamp
+                            socketio.emit('update', shipment.to_dict(), namespace='/', room=tracking)
+                            for subscriber in shipment.subscribers:
+                                if subscriber.is_active:
+                                    if subscriber.email:
+                                        send_checkpoint_email_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.email)
+                                    if subscriber.phone:
+                                        send_checkpoint_sms_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.phone)
+                            send_message(
+                                f"📍 Checkpoint added to {tracking} with photo successfully! 🔍",
+                                chat_id,
+                                get_navigation_keyboard(tracking)
+                            )
+                            logger.info(f"Checkpoint added to {tracking} with compressed photo via Telegram by chat {chat_id}")
+                            return jsonify({'message': 'Checkpoint added'})
+                        except ValidationError as e:
+                            send_message(
+                                f"🚫 Error: {str(e)} (or press Cancel)",
+                                chat_id,
+                                {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
+                            )
+                            return jsonify({'error': str(e)}), 400
+                        except ValueError as e:
+                            send_message(
+                                f"🚫 Error: {str(e)} (or press Cancel)",
+                                chat_id,
+                                {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
+                            )
+                            return jsonify({'error': str(e)}), 400
+                        except SQLAlchemyError as e:
+                            db.session.rollback()
+                            logger.error(f"Database error in Telegram checkpoint creation: {e}")
+                            send_message(
+                                f"💾 Database error! (or press Cancel)",
+                                chat_id,
+                                {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
+                            )
+                            return jsonify({'error': 'Database error'}), 500
+                        except Exception as e:
+                            logger.error(f"Unexpected error in Telegram checkpoint creation for {tracking}: {e}")
+                            send_message(
+                                f"🚫 Unexpected error! (or press Cancel)",
+                                chat_id,
+                                {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
+                            )
+                            return jsonify({'error': 'Unexpected error'}), 500
+                    except requests.RequestException as e:
+                        logger.error(f"Telegram file download failed: {e}")
+                        send_message(
+                            f"🚫 Failed to download photo! (or press Cancel)",
+                            chat_id,
+                            {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
+                        )
+                        return jsonify({'error': 'Photo download failed'}), 500
+                elif state['step'] == 'num_points':
+                    num_points = bleach.clean(text)
+                    tracking = state['tracking']
+                    try:
+                        num_points = int(num_points)
+                        if num_points < 2 or num_points > 10:
+                            send_message(
+                                "🚫 Number of points must be 2-10 (or press Cancel)",
+                                chat_id,
+                                {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
+                            )
+                            return jsonify({'error': 'Invalid number of points'}), 400
+                        session['state']['step'] = 'step_hours'
+                        session['state']['num_points'] = num_points
+                        send_message(
+                            f"⏱ Enter step hours (1-24) for {tracking} (or press Cancel):",
+                            chat_id,
+                            {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
+                        )
+                        admin_sessions[chat_id] = session
+                        return jsonify({'message': 'Prompted step hours'})
+                    except ValueError:
+                        send_message(
+                            "🚫 Invalid number! Enter 2-10 (or press Cancel)",
+                            chat_id,
+                            {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
+                        )
+                        return jsonify({'error': 'Invalid number'}), 400
+                elif state['step'] == 'step_hours':
+                    step_hours = bleach.clean(text)
+                    tracking = state['tracking']
+                    num_points = state['num_points']
+                    try:
+                        step_hours = int(step_hours)
+                        if step_hours < 1 or step_hours > 24:
+                            send_message(
+                                "🚫 Step hours must be 1-24 (or press Cancel)",
+                                chat_id,
+                                {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
+                            )
+                            return jsonify({'error': 'Invalid step hours'}), 400
+                        session.pop('state', None)
+                        admin_sessions[chat_id] = session
+                        shipment = Shipment.query.filter_by(tracking=tracking).first()
+                        if not shipment:
+                            send_message(
+                                f"🔍 Shipment {tracking} not found! (or press Cancel)",
+                                chat_id,
+                                {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
+                            )
+                            return jsonify({'error': 'Shipment not found'}), 404
+                        if shipment.status == ShipmentStatus.DELIVERED.value:
+                            send_message(
+                                f"🚫 Shipment {tracking} already delivered!",
+                                chat_id,
+                                get_navigation_keyboard(tracking)
+                            )
+                            return jsonify({'error': 'Shipment already delivered'}), 400
+                        simulation_state = SimulationState.query.filter_by(shipment_id=shipment.id).first()
+                        if simulation_state and simulation_state.status == 'running':
+                            send_message(
+                                f"🚫 Simulation already running for {tracking}!",
+                                chat_id,
+                                get_navigation_keyboard(tracking)
+                            )
+                            return jsonify({'error': 'Simulation already running'}), 400
+                        run_simulation_async.delay(shipment.id, num_points, step_hours)
+                        send_message(
+                            f"🚚 Simulation started for {tracking} with {num_points} points and {step_hours} hours/step!",
+                            chat_id,
+                            get_navigation_keyboard(tracking)
+                        )
+                        logger.info(f"Simulation started for {tracking} via Telegram by chat {chat_id}")
+                        return jsonify({'message': 'Simulation started'})
+                    except ValueError:
+                        send_message(
+                            "🚫 Invalid number! Enter 1-24 (or press Cancel)",
+                            chat_id,
+                            {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
+                        )
+                        return jsonify({'error': 'Invalid number'}), 400
+                    except SQLAlchemyError as e:
+                        db.session.rollback()
+                        logger.error(f"Database error in Telegram simulation: {e}")
+                        send_message(
+                            f"💾 Database error! (or press Cancel)",
+                            chat_id,
+                            {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}
+                        )
+                        return jsonify({'error': 'Database error'}), 500
+
+        elif callback_query:
+            data = callback_query['data']
+            message_id = callback_query['message']['message_id']
+            if data == '/create':
+                admin_sessions[chat_id] = admin_sessions.get(chat_id, {})
+                admin_sessions[chat_id]['state'] = {'command': '/create', 'step': 'tracking'}
+                send_message("📦 Enter tracking number:", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}, message_id)
+                return jsonify({'message': 'Prompted tracking number'})
+            elif data == '/subscribe':
+                admin_sessions[chat_id] = admin_sessions.get(chat_id, {})
+                admin_sessions[chat_id]['state'] = {'command': '/subscribe', 'step': 'tracking'}
+                send_message("📩 Enter tracking number to subscribe:", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}, message_id)
+                return jsonify({'message': 'Prompted tracking number'})
+            elif data == '/addcp':
+                admin_sessions[chat_id] = admin_sessions.get(chat_id, {})
+                admin_sessions[chat_id]['state'] = {'command': '/addcp', 'step': 'tracking'}
+                send_message("📍 Enter tracking number for checkpoint:", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}, message_id)
+                return jsonify({'message': 'Prompted tracking number'})
+            elif data == '/simulate':
+                admin_sessions[chat_id] = admin_sessions.get(chat_id, {})
+                admin_sessions[chat_id]['state'] = {'command': '/simulate', 'step': 'tracking'}
+                send_message("🚚 Enter tracking number to simulate:", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}, message_id)
+                return jsonify({'message': 'Prompted tracking number'})
+            elif data == '/track_multiple':
+                admin_sessions[chat_id] = admin_sessions.get(chat_id, {})
+                admin_sessions[chat_id]['state'] = {'command': '/track_multiple', 'step': 'tracking_numbers'}
+                send_message("🔍 Enter tracking numbers (comma-separated):", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}, message_id)
+                return jsonify({'message': 'Prompted tracking numbers'})
+            elif data == '/admin_menu':
+                session = admin_sessions.get(chat_id, {})
+                if not session or not session.get('authenticated') or datetime.utcnow() >= session['expires']:
+                    send_message("🚫 Please login with /admin_login <password>", chat_id, get_navigation_keyboard(), message_id)
+                    return jsonify({'error': 'Not authenticated'}), 401
+                send_message("🔧 Admin Panel:", chat_id, get_admin_keyboard(), message_id)
+                return jsonify({'message': 'Admin menu displayed'})
+            elif data == '/admin_create_shipment':
+                session = admin_sessions.get(chat_id, {})
+                if not session or not session.get('authenticated') or datetime.utcnow() >= session['expires']:
+                    send_message("🚫 Please login with /admin_login <password>", chat_id, get_navigation_keyboard(), message_id)
+                    return jsonify({'error': 'Not authenticated'}), 401
+                admin_sessions[chat_id]['state'] = {'command': '/admin_create_shipment', 'step': 'tracking'}
+                send_message("📦 Enter tracking number:", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}, message_id)
+                return jsonify({'message': 'Prompted tracking number'})
+            elif data == '/admin_list_shipments':
+                session = admin_sessions.get(chat_id, {})
+                if not session or not session.get('authenticated') or datetime.utcnow() >= session['expires']:
+                    send_message("🚫 Please login with /admin_login <password>", chat_id, get_navigation_keyboard(), message_id)
+                    return jsonify({'error': 'Not authenticated'}), 401
+                shipments = Shipment.query.all()
+                if not shipments:
+                    send_message("📦 No shipments found.", chat_id, get_admin_keyboard(), message_id)
+                else:
+                    text = "\n".join([f"📦 {s.tracking}: {s.title} ({s.status})" for s in shipments[:10]])
+                    send_message(f"📋 Shipments:\n{text}", chat_id, get_admin_keyboard(), message_id)
+                return jsonify({'message': 'Listed shipments'})
+            elif data == '/admin_delete_shipment':
+                session = admin_sessions.get(chat_id, {})
+                if not session or not session.get('authenticated') or datetime.utcnow() >= session['expires']:
+                    send_message("🚫 Please login with /admin_login <password>", chat_id, get_navigation_keyboard(), message_id)
+                    return jsonify({'error': 'Not authenticated'}), 401
+                send_message("📦 Select a shipment to delete:", chat_id, get_shipment_selection_keyboard('/admin_delete_shipment'), message_id)
+                return jsonify({'message': 'Prompted shipment selection'})
+            elif data.startswith('select_shipment|/admin_delete_shipment|'):
+                session = admin_sessions.get(chat_id, {})
+                if not session or not session.get('authenticated') or datetime.utcnow() >= session['expires']:
+                    send_message("🚫 Please login with /admin_login <password>", chat_id, get_navigation_keyboard(), message_id)
+                    return jsonify({'error': 'Not authenticated'}), 401
+                tracking = data.split('|')[-1]
+                shipment = Shipment.query.filter_by(tracking=tracking).first()
+                if not shipment:
+                    send_message(f"🔍 Shipment {tracking} not found!", chat_id, get_admin_keyboard(), message_id)
+                    return jsonify({'error': 'Shipment not found'}), 404
+                try:
+                    with db.session.begin():
+                        db.session.delete(shipment)
+                    send_message(f"🗑 Shipment {tracking} deleted successfully!", chat_id, get_admin_keyboard(), message_id)
+                    logger.info(f"Shipment {tracking} deleted via Telegram by chat {chat_id}")
+                    return jsonify({'message': 'Shipment deleted'})
+                except SQLAlchemyError as e:
+                    db.session.rollback()
+                    logger.error(f"Database error in Telegram shipment deletion: {e}")
+                    send_message(f"💾 Database error!", chat_id, get_admin_keyboard(), message_id)
+                    return jsonify({'error': 'Database error'}), 500
+            elif data == '/admin_update_status':
+                session = admin_sessions.get(chat_id, {})
+                if not session or not session.get('authenticated') or datetime.utcnow() >= session['expires']:
+                    send_message("🚫 Please login with /admin_login <password>", chat_id, get_navigation_keyboard(), message_id)
+                    return jsonify({'error': 'Not authenticated'}), 401
+                send_message("📦 Select a shipment to update status:", chat_id, get_shipment_selection_keyboard('/admin_update_status'), message_id)
+                return jsonify({'message': 'Prompted shipment selection'})
+            elif data.startswith('select_shipment|/admin_update_status|'):
+                session = admin_sessions.get(chat_id, {})
+                if not session or not session.get('authenticated') or datetime.utcnow() >= session['expires']:
+                    send_message("🚫 Please login with /admin_login <password>", chat_id, get_navigation_keyboard(), message_id)
+                    return jsonify({'error': 'Not authenticated'}), 401
+                tracking = data.split('|')[-1]
+                send_message(f"📋 Select new status for {tracking}:", chat_id, get_status_selection_keyboard(tracking), message_id)
+                return jsonify({'message': 'Prompted status selection'})
+            elif data.startswith('select_status|/admin_update_status|'):
+                session = admin_sessions.get(chat_id, {})
+                if not session or not session.get('authenticated') or datetime.utcnow() >= session['expires']:
+                    send_message("🚫 Please login with /admin_login <password>", chat_id, get_navigation_keyboard(), message_id)
+                    return jsonify({'error': 'Not authenticated'}), 401
+                _, _, tracking, status = data.split('|')
+                shipment = Shipment.query.filter_by(tracking=tracking).first()
+                if not shipment:
+                    send_message(f"🔍 Shipment {tracking} not found!", chat_id, get_admin_keyboard(), message_id)
+                    return jsonify({'error': 'Shipment not found'}), 404
+                try:
+                    with db.session.begin():
+                        shipment.status = status
+                        db.session.add(StatusHistory(shipment=shipment, status=status))
+                        if shipment.status == ShipmentStatus.DELIVERED.value:
+                            shipment.eta = datetime.utcnow()
+                    socketio.emit('update', shipment.to_dict(), namespace='/', room=tracking)
+                    send_message(f"📋 Status for {tracking} updated to {status}!", chat_id, get_admin_keyboard(), message_id)
+                    logger.info(f"Status for {tracking} updated to {status} via Telegram by chat {chat_id}")
+                    return jsonify({'message': 'Status updated'})
+                except SQLAlchemyError as e:
+                    db.session.rollback()
+                    logger.error(f"Database error in Telegram status update: {e}")
+                    send_message(f"💾 Database error!", chat_id, get_admin_keyboard(), message_id)
+                    return jsonify({'error': 'Database error'}), 500
+            elif data == '/admin_list_subscribers':
+                session = admin_sessions.get(chat_id, {})
+                if not session or not session.get('authenticated') or datetime.utcnow() >= session['expires']:
+                    send_message("🚫 Please login with /admin_login <password>", chat_id, get_navigation_keyboard(), message_id)
+                    return jsonify({'error': 'Not authenticated'}), 401
+                subscribers = Subscriber.query.all()
+                if not subscribers:
+                    send_message("📩 No subscribers found.", chat_id, get_admin_keyboard(), message_id)
+                else:
+                    text = "\n".join([f"📩 {s.email or s.phone} for {s.shipment.tracking}" for s in subscribers[:10]])
+                    send_message(f"📋 Subscribers:\n{text}", chat_id, get_admin_keyboard(), message_id)
+                return jsonify({'message': 'Listed subscribers'})
+            elif data == '/admin_unsubscribe':
+                session = admin_sessions.get(chat_id, {})
+                if not session or not session.get('authenticated') or datetime.utcnow() >= session['expires']:
+                    send_message("🚫 Please login with /admin_login <password>", chat_id, get_navigation_keyboard(), message_id)
+                    return jsonify({'error': 'Not authenticated'}), 401
+                admin_sessions[chat_id]['state'] = {'command': '/admin_unsubscribe', 'step': 'tracking_contact'}
+                send_message("📩 Enter tracking number and email/phone to unsubscribe (e.g., TR12345 user@example.com):", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]}, message_id)
+                return jsonify({'message': 'Prompted tracking and contact'})
+            elif state['step'] == 'tracking_contact' and state['command'] == '/admin_unsubscribe':
+                parts = text.split()
+                if len(parts) != 2:
+                    send_message("🚫 Usage: <tracking> <email or phone> (or press Cancel)", chat_id, {'inline_keyboard': [[{'text': 'Cancel', 'callback_data': '/cancel'}]]})
+                    return jsonify({'error': 'Invalid format'}), 400
+                tracking, contact = parts
+                tracking = bleach.clean(tracking)
+                contact = bleach.clean(contact)
+                shipment = Shipment.query.filter_by(tracking=tracking).first()
+                if not shipment:
+                    send_message(f"🔍 Shipment {tracking} not found!", chat_id, get_admin_keyboard(), message_id)
+                    return jsonify({'error': 'Shipment not found'}), 404
+                subscriber = Subscriber.query.filter_by(shipment_id=shipment.id).filter((Subscriber.email == contact) | (Subscriber.phone == contact)).first()
+                if not subscriber:
+                    send_message(f"📩 Subscriber {contact} not found for {tracking}!", chat_id, get_admin_keyboard(), message_id)
+                    return jsonify({'error': 'Subscriber not found'}), 404
+                try:
+                    with db.session.begin():
+                        db.session.delete(subscriber)
+                    send_message(f"📩 Unsubscribed {contact} from {tracking}!", chat_id, get_admin_keyboard(), message_id)
+                    logger.info(f"Unsubscribed {contact} from {tracking} via Telegram by chat {chat_id}")
+                    return jsonify({'message': 'Unsubscribed'})
+                except SQLAlchemyError as e:
+                    db.session.rollback()
+                    logger.error(f"Database error in Telegram unsubscribe: {e}")
+                    send_message(f"💾 Database error!", chat_id, get_admin_keyboard(), message_id)
+                    return jsonify({'error': 'Database error'}), 500
+            elif data == '/admin_pause_sim':
+                session = admin_sessions.get(chat_id, {})
+                if not session or not session.get('authenticated') or datetime.utcnow() >= session['expires']:
+                    send_message("🚫 Please login with /admin_login <password>", chat_id, get_navigation_keyboard(), message_id)
+                    return jsonify({'error': 'Not authenticated'}), 401
+                send_message("🚚 Select a shipment to pause simulation:", chat_id, get_shipment_selection_keyboard('/admin_pause_sim'), message_id)
+                return jsonify({'message': 'Prompted shipment selection'})
+            elif data.startswith('select_shipment|/admin_pause_sim|'):
+                session = admin_sessions.get(chat_id, {})
+                if not session or not session.get('authenticated') or datetime.utcnow() >= session['expires']:
+                    send_message("🚫 Please login with /admin_login <password>", chat_id, get_navigation_keyboard(), message_id)
+                    return jsonify({'error': 'Not authenticated'}), 401
+                tracking = data.split('|')[-1]
+                shipment = Shipment.query.filter_by(tracking=tracking).first()
+                if not shipment:
+                    send_message(f"🔍 Shipment {tracking} not found!", chat_id, get_admin_keyboard(), message_id)
+                    return jsonify({'error': 'Shipment not found'}), 404
+                simulation_state = SimulationState.query.filter_by(shipment_id=shipment.id).first()
+                if not simulation_state or simulation_state.status != 'running':
+                    send_message(f"🚫 No active simulation for {tracking}!", chat_id, get_admin_keyboard(), message_id)
+                    return jsonify({'error': 'No active simulation'}), 400
+                try:
+                    with db.session.begin():
+                        simulation_state.status = 'paused'
+                    send_message(f"⏸ Simulation paused for {tracking}!", chat_id, get_admin_keyboard(), message_id)
+                    logger.info(f"Simulation paused for {tracking} via Telegram by chat {chat_id}")
+                    return jsonify({'message': 'Simulation paused'})
+                except SQLAlchemyError as e:
+                    db.session.rollback()
+                    logger.error(f"Database error in Telegram pause simulation: {e}")
+                    send_message(f"💾 Database error!", chat_id, get_admin_keyboard(), message_id)
+                    return jsonify({'error': 'Database error'}), 500
+            elif data == '/admin_continue_sim':
+                session = admin_sessions.get(chat_id, {})
+                if not session or not session.get('authenticated') or datetime.utcnow() >= session['expires']:
+                    send_message("🚫 Please login with /admin_login <password>", chat_id, get_navigation_keyboard(), message_id)
+                    return jsonify({'error': 'Not authenticated'}), 401
+                send_message("🚚 Select a shipment to continue simulation:", chat_id, get_shipment_selection_keyboard('/admin_continue_sim'), message_id)
+                return jsonify({'message': 'Prompted shipment selection'})
+            elif data.startswith('select_shipment|/admin_continue_sim|'):
+                session = admin_sessions.get(chat_id, {})
+                if not session or not session.get('authenticated') or datetime.utcnow() >= session['expires']:
+                    send_message("🚫 Please login with /admin_login <password>", chat_id, get_navigation_keyboard(), message_id)
+                    return jsonify({'error': 'Not authenticated'}), 401
+                tracking = data.split('|')[-1]
+                shipment = Shipment.query.filter_by(tracking=tracking).first()
+                if not shipment:
+                    send_message(f"🔍 Shipment {tracking} not found!", chat_id, get_admin_keyboard(), message_id)
+                    return jsonify({'error': 'Shipment not found'}), 404
+                simulation_state = SimulationState.query.filter_by(shipment_id=shipment.id).first()
+                if not simulation_state or simulation_state.status != 'paused':
+                    send_message(f"🚫 No paused simulation for {tracking}!", chat_id, get_admin_keyboard(), message_id)
+                    return jsonify({'error': 'No paused simulation'}), 400
+                try:
+                    with db.session.begin():
+                        simulation_state.status = 'running'
+                    run_simulation_async.delay(shipment.id, simulation_state.num_points, simulation_state.step_hours)
+                    send_message(f"▶ Simulation continued for {tracking}!", chat_id, get_admin_keyboard(), message_id)
+                    logger.info(f"Simulation continued for {tracking} via Telegram by chat {chat_id}")
+                    return jsonify({'message': 'Simulation continued'})
+                except SQLAlchemyError as e:
+                    db.session.rollback()
+                    logger.error(f"Database error in Telegram continue simulation: {e}")
+                    send_message(f"💾 Database error!", chat_id, get_admin_keyboard(), message_id)
+                    return jsonify({'error': 'Database error'}), 500
+            elif data == '/admin_health':
+                session = admin_sessions.get(chat_id, {})
+                if not session or not session.get('authenticated') or datetime.utcnow() >= session['expires']:
+                    send_message("🚫 Please login with /admin_login <password>", chat_id, get_navigation_keyboard(), message_id)
+                    return jsonify({'error': 'Not authenticated'}), 401
+                try:
+                    db.session.execute('SELECT 1')
+                    celery_status = celery.control.ping(timeout=1)
+                    status = {
+                        'status': 'healthy',
+                        'database': 'connected',
+                        'celery': 'responsive' if celery_status else 'unresponsive',
+                        'timestamp': datetime.utcnow().isoformat() + 'Z'
+                    }
+                    send_message(f"🩺 Health Check:\n{json.dumps(status, indent=2)}", chat_id, get_admin_keyboard(), message_id)
+                    return jsonify({'message': 'Health check displayed'})
+                except SQLAlchemyError as e:
+                    logger.error(f"Health check failed: {e}")
+                    send_message("🩺 Health Check: Database disconnected", chat_id, get_admin_keyboard(), message_id)
+                    return jsonify({'error': 'Database error'}), 500
+                except Exception as e:
+                    logger.error(f"Health check exception: {e}")
+                    send_message("🩺 Health Check: Unhealthy", chat_id, get_admin_keyboard(), message_id)
+                    return jsonify({'error': 'Unexpected error'}), 500
+            elif data == '/admin_logout':
+                admin_sessions.pop(chat_id, None)
+                send_message("🔐 Logged out successfully!", chat_id, get_navigation_keyboard(), message_id)
+                logger.info(f"Admin logged out for chat {chat_id}")
+                return jsonify({'message': 'Logged out'})
+            elif data == '/cancel':
+                admin_sessions.pop(chat_id, None)
+                send_message("❌ Operation cancelled.", chat_id, get_navigation_keyboard(), message_id)
+                return jsonify({'message': 'Operation cancelled'})
+            elif data.startswith('skip_status|/addcp|'):
+                session = admin_sessions.get(chat_id, {})
+                if not session or 'state' not in session or session['state']['tracking'] != data.split('|')[-1]:
+                    send_message("🚫 Invalid session! Please start over.", chat_id, get_navigation_keyboard(), message_id)
+                    return jsonify({'error': 'Invalid session'}), 400
+                tracking = data.split('|')[-1]
+                state = session['state']
+                location = state['location']
+                label = state['label']
+                note = state.get('note')
+                session['state']['step'] = 'photo'
+                session['state']['status'] = None
+                admin_sessions[chat_id] = session
+                send_message(
+                    f"📸 Upload a proof photo for {tracking} (or press Skip/Cancel):",
+                    chat_id,
+                    {'inline_keyboard': [
+                        [{'text': 'Skip', 'callback_data': f'skip_photo|/addcp|{tracking}'}],
+                        [{'text': 'Cancel', 'callback_data': '/cancel'}]
+                    ]},
+                    message_id
+                )
+                return jsonify({'message': 'Prompted photo'})
+            elif data.startswith('skip_photo|/addcp|'):
+                session = admin_sessions.get(chat_id, {})
+                if not session or 'state' not in session or session['state']['tracking'] != data.split('|')[-1]:
+                    send_message("🚫 Invalid session! Please start over.", chat_id, get_navigation_keyboard(), message_id)
+                    return jsonify({'error': 'Invalid session'}), 400
+                tracking = data.split('|')[-1]
+                state = session['state']
+                location = state['location']
+                label = state['label']
+                note = state.get('note')
+                status = state.get('status')
+                session.pop('state', None)
+                admin_sessions[chat_id] = session
+                shipment = Shipment.query.filter_by(tracking=tracking).first()
+                if not shipment:
+                    send_message(f"🔍 Shipment {tracking} not found!", chat_id, get_navigation_keyboard(), message_id)
+                    return jsonify({'error': 'Shipment not found'}), 404
+                try:
+                    checkpoint_data = {
+                        'address': location if ',' not in location else None,
+                        'lat': float(location.split(',')[0]) if ',' in location and all(x.replace('.', '').isdigit() for x in location.split(',')) else None,
+                        'lng': float(location.split(',')[1]) if ',' in location and all(x.replace('.', '').isdigit() for x in location.split(',')) else None,
+                        'label': label,
+                        'note': note,
+                        'status': status,
+                        'proof_photo': None
+                    }
+                    CheckpointCreate(**checkpoint_data)
+                    if checkpoint_data['address']:
+                        coords = geocode_address(checkpoint_data['address'])
+                        lat, lng = coords['lat'], coords['lng']
+                    else:
+                        lat, lng = checkpoint_data['lat'], checkpoint_data['lng']
+                    position = db.session.query(db.func.max(Checkpoint.position)).filter_by(shipment_id=shipment.id).scalar() or 0
+                    checkpoint = Checkpoint(
+                        shipment_id=shipment.id,
+                        position=position + 1,
+                        lat=lat,
+                        lng=lng,
+                        label=label,
+                        note=note,
+                        status=status,
+                        proof_photo=None
+                    )
+                    with db.session.begin():
+                        db.session.add(checkpoint)
+                        if status:
+                            shipment.status = status
+                            db.session.add(StatusHistory(shipment=shipment, status=status))
+                            if shipment.status == ShipmentStatus.DELIVERED.value:
+                                shipment.eta = checkpoint.timestamp
+                    socketio.emit('update', shipment.to_dict(), namespace='/', room=tracking)
+                    for subscriber in shipment.subscribers:
+                        if subscriber.is_active:
+                            if subscriber.email:
+                                send_checkpoint_email_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.email)
+                            if subscriber.phone:
+                                send_checkpoint_sms_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.phone)
+                    send_message(
+                        f"📍 Checkpoint added to {tracking} successfully! 🔍",
+                        chat_id,
+                        get_navigation_keyboard(tracking),
+                        message_id
+                    )
+                    logger.info(f"Checkpoint added to {tracking} via Telegram by chat {chat_id} (skipped photo)")
+                    return jsonify({'message': 'Checkpoint added'})
+                except ValidationError as e:
+                    send_message(f"🚫 Error: {str(e)}", chat_id, get_navigation_keyboard(), message_id)
+                    return jsonify({'error': str(e)}), 400
+                except ValueError as e:
+                    send_message(f"🚫 Error: {str(e)}", chat_id, get_navigation_keyboard(), message_id)
+                    return jsonify({'error': str(e)}), 400
+                except SQLAlchemyError as e:
+                    db.session.rollback()
+                    logger.error(f"Database error in Telegram checkpoint creation (skip photo): {e}")
+                    send_message(f"💾 Database error!", chat_id, get_navigation_keyboard(), message_id)
+                    return jsonify({'error': 'Database error'}), 500
+                except Exception as e:
+                    logger.error(f"Unexpected error in Telegram checkpoint creation (skip photo) for {tracking}: {e}")
+                    send_message(f"🚫 Unexpected error!", chat_id, get_navigation_keyboard(), message_id)
+                    return jsonify({'error': 'Unexpected error'}), 500
+
+        return jsonify({'message': 'No action taken'})
+    except Exception as e:
+        logger.error(f"Unexpected error in Telegram webhook: {e}")
+        return jsonify({'error': 'Unexpected error'}), 500
