@@ -42,14 +42,26 @@ app = Flask(__name__, template_folder='templates')
 def index():
     return render_template('index.html')
 
-# Restore get_smtp_connection helper function and cache initialization
+# Restore get_smtp_connection helper function
 def get_smtp_connection():
     server = smtplib.SMTP(app.config['SMTP_HOST'], app.config['SMTP_PORT'])
     server.starttls()
     server.login(app.config['SMTP_USER'], app.config['SMTP_PASS'])
     return server
 
-# Initialize Flask-Caching
+# Load required environment variables and fail early if missing
+required_vars = [
+    'SECRET_KEY', 'SQLALCHEMY_DATABASE_URI', 'JWT_SECRET_KEY', 'CELERY_BROKER_URL',
+    'CELERY_RESULT_BACKEND', 'REDIS_URL', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS',
+    'SMTP_FROM', 'APP_BASE_URL'
+]
+for var in required_vars:
+    value = os.environ.get(var)
+    if value is None:
+        raise RuntimeError(f"Missing required environment variable: {var}")
+    app.config[var] = value
+
+# Now safe to initialize Flask-Caching
 cache = Cache(app, config={'CACHE_TYPE': 'redis', 'CACHE_REDIS_URL': app.config['REDIS_URL']})
 
 # Import requests for HTTP calls
