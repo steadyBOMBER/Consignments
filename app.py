@@ -3,11 +3,14 @@ import logging
 import smtplib
 import random
 import json
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+import re
+import time
 from datetime import datetime, timedelta
-from flask import Flask, request, jsonify, render_template, redirect, url_for
-from flask_jwt_extended import jwt_required, create_access_token
+from typing import Dict, Union, Optional as TypingOptional, List, Tuple
+from packaging import version
+import validators
+import requests
+from flask import Flask, request, jsonify, render_template, redirect, url_for, session, abort
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_sqlalchemy import SQLAlchemy
@@ -15,66 +18,139 @@ from flask_migrate import Migrate
 from flask_socketio import SocketIO, emit, join_room
 from flask_caching import Cache
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from werkzeug.security import check_password_hash
-from twilio.rest import Client
+from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 from math import radians, sin, cos, sqrt, atan2
-from typing import Dict, Union, Optional as TypingOptional
 from pydantic import BaseModel, validator, ValidationError
 from logging.handlers import RotatingFileHandler
 from celery import Celery, shared_task
 import redis
 import bleach
-try:
-    from retry import retry
-except ImportError:
-    retry = None
-try:
-    from twilio.base.exceptions import TwilioRestException
-except ImportError:
-    TwilioRestException = Exception
-import requests
-import base64
+from retry import retry
 from enum import Enum
+from PIL import Image
+from io import BytesIO
+import boto3
+from botocore.exceptions import ClientError
+from geographiclib.geodesic import Geodesic
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 # Initialize Flask app
-app = Flask(__name__, template_folder='templates')
+app = Flask(__name__, template_folder='templates', static_folder='static')
 
-# Load required environment variables and fail early if missing
-required_vars = [
-    'SECRET_KEY', 'SQLALCHEMY_DATABASE_URI', 'JWT_SECRET_KEY', 'CELERY_BROKER_URL',
-    'CELERY_RESULT_BACKEND', 'REDIS_URL', 'SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS',
-    'SMTP_FROM', 'APP_BASE_URL', 'ADMIN_EMAIL', 'ADMIN_PHONE', 'TELEGRAM_TOKEN', 'TWILIO_ACCOUNT_SID',
-    'TWILIO_AUTH_TOKEN', 'TWILIO_PHONE_NUMBER', 'ADMIN_PASSWORD_HASH', 'FEDEX_CLIENT_ID',
-    'FEDEX_CLIENT_SECRET', 'FEDEX_ACCOUNT_NUMBER', 'FEDEX_METER_NUMBER'
-]
-for var in required_vars:
-    value = os.environ.get(var)
-    if value is None:
-        raise RuntimeError(f"Missing required environment variable: {var}")
-    app.config[var] = value
+# Configuration class with validation
+class Settings(BaseModel):
+    SECRET_KEY: str
+    SQLALCHEMY_DATABASE_URI: str
+    CELERY_BROKER_URL: str
+    CELERY_RESULT_BACKEND: str
+    REDIS_URL: str
+    SMTP_HOST: str
+    SMTP_PORT: int
+    SMTP_USER: str
+    SMTP_PASS: str
+    SMTP_FROM: str
+    APP_BASE_URL: str
+    ADMIN_EMAIL: str
+    ADMIN_PHONE: str
+    TELEGRAM_TOKEN: str
+    ADMIN_PASSWORD: str = "Biggerboy"  # Default hardcoded password
+    AWS_ACCESS_KEY_ID: TypingOptional[str] = None
+    AWS_SECRET_ACCESS_KEY: TypingOptional[str] = None
+    S3_BUCKET: TypingOptional[str] = None
+    UPLOAD_FOLDER: str = "static/uploads"
+    MAX_FILE_SIZE: int = 10 * 1024 * 1024  # 10MB
+    IMAGE_QUALITY: int = 85
+    DEFAULT_SPEED_KMH: float = 50.0
+    GEOCODING_TIMEOUT: int = 5
+    RATE_LIMIT_DEFAULT: str = "200 per day, 50 per hour"
+    OSRM_ENABLED: bool = True
+    OSRM_URL: str = "http://router.project-osrm.org"
+    MAX_WAYPOINTS: int = 50
+    TRAFFIC_VARIABILITY: float = 0.5
 
-# Configure caching
-cache = Cache(app, config={'CACHE_TYPE': 'redis', 'CACHE_REDIS_URL': app.config['REDIS_URL']})
+    @validator('SMTP_PORT')
+    def validate_smtp_port(cls, v):
+        if not 1 <= v <= 65535:
+            raise ValueError('SMTP_PORT must be between 1 and 65535')
+        return v
 
-# Shipment status enum
-class ShipmentStatus(Enum):
-    CREATED = 'Created'
-    IN_TRANSIT = 'In Transit'
-    OUT_FOR_DELIVERY = 'Out for Delivery'
-    DELIVERED = 'Delivered'
+    @validator('TELEGRAM_TOKEN')
+    def validate_telegram_token(cls, v):
+        if not re.match(r'^\d+:[A-Za-z0-9_-]+$', v):
+            raise ValueError('Invalid Telegram token format')
+        return v
 
-# Configure logging
+    @validator('APP_BASE_URL')
+    def validate_base_url(cls, v):
+        if not v.startswith(('http://', 'https://')):
+            raise ValueError('APP_BASE_URL must start with http:// or https://')
+        return v.rstrip('/')
+
+    class Config:
+        env_file = '.env'
+        env_file_encoding = 'utf-8'
+
+# Dependency validator
+class DependencyValidator:
+    REQUIRED_PACKAGES = {
+        'flask': '2.0.0',
+        'flask-sqlalchemy': '2.5.0',
+        'flask-limiter': '2.0.0',
+        'celery': '5.0.0',
+        'redis': '4.0.0',
+        'pydantic': '1.8.0',
+        'pillow': '8.0.0',
+        'boto3': '1.18.0',
+        'retry': '0.9.2',
+        'geographiclib': '2.0'
+    }
+
+    @classmethod
+    def validate_dependencies(cls):
+        missing = []
+        outdated = []
+        for package, min_version in cls.REQUIRED_PACKAGES.items():
+            try:
+                imported = __import__(package.replace('-', '_'))
+                installed_version = getattr(imported, '__version__', 'unknown')
+                if version.parse(str(installed_version)) < version.parse(min_version):
+                    outdated.append(f"{package} (need >= {min_version}, have {installed_version})")
+            except ImportError:
+                missing.append(package)
+        if missing:
+            raise ImportError(f"Missing packages: {', '.join(missing)}\nInstall with: pip install {' '.join(missing)}")
+        if outdated:
+            app.logger.warning(f"Outdated packages: {', '.join(outdated)}")
+
+# Initialize logging
 handler = RotatingFileHandler('app.log', maxBytes=1000000, backupCount=5)
 handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'))
 app.logger.addHandler(handler)
 app.logger.setLevel(logging.INFO)
 logger = app.logger
 
+# Validate dependencies and load settings
+try:
+    DependencyValidator.validate_dependencies()
+    settings = Settings()
+    for key, value in settings.dict().items():
+        if value is not None:
+            app.config[key] = value
+    # Hash the admin password for secure comparison
+    app.config['ADMIN_PASSWORD_HASH'] = generate_password_hash(app.config['ADMIN_PASSWORD'])
+except Exception as e:
+    logger.error(f"Startup validation failed: {e}")
+    raise
+
 # Initialize extensions
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
 socketio = SocketIO(app, cors_allowed_origins="*")
-limiter = Limiter(app, key_func=get_remote_address, default_limits=["200 per day", "50 per hour"])
+limiter = Limiter(app, key_func=get_remote_address, default_limits=[settings.RATE_LIMIT_DEFAULT])
+cache = Cache(app, config={'CACHE_TYPE': 'redis', 'CACHE_REDIS_URL': app.config['REDIS_URL']})
+redis_client = redis.Redis.from_url(app.config['REDIS_URL'])
 
 # Initialize Celery
 def make_celery(app):
@@ -88,23 +164,21 @@ def make_celery(app):
 
 celery = make_celery(app)
 
-# Initialize Redis
-redis_client = redis.Redis.from_url(app.config['REDIS_URL'])
+# Shipment status enum
+class ShipmentStatus(Enum):
+    CREATED = 'Created'
+    IN_TRANSIT = 'In Transit'
+    OUT_FOR_DELIVERY = 'Out for Delivery'
+    DELIVERED = 'Delivered'
 
-# Initialize Twilio
-TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
-TWILIO_AUTH_TOKEN = os.getenv('TWILIO_AUTH_TOKEN')
-TWILIO_PHONE_NUMBER = os.getenv('TWILIO_PHONE_NUMBER')
-
-# Admin sessions (stored in Redis)
-admin_sessions = {}
-
-# Helper function for SMTP connection
-def get_smtp_connection():
-    server = smtplib.SMTP(app.config['SMTP_HOST'], app.config['SMTP_PORT'])
-    server.starttls()
-    server.login(app.config['SMTP_USER'], app.config['SMTP_PASS'])
-    return server
+# Authentication decorator
+def admin_required(f):
+    def wrap(*args, **kwargs):
+        if not session.get('is_admin'):
+            abort(401)  # Unauthorized
+        return f(*args, **kwargs)
+    wrap.__name__ = f.__name__
+    return wrap
 
 # Database Models
 class StatusHistory(db.Model):
@@ -121,7 +195,7 @@ class StatusHistory(db.Model):
 
 class Shipment(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    tracking = db.Column(db.String(50), unique=True, nullable=False)
+    tracking = db.Column(db.String(50), unique=True, nullable=False, index=True)
     title = db.Column(db.String(100), nullable=False)
     origin_lat = db.Column(db.Float, nullable=False)
     origin_lng = db.Column(db.Float, nullable=False)
@@ -153,7 +227,8 @@ class Shipment(db.Model):
             'eta': self.eta.isoformat() + 'Z' if self.eta else None,
             'status': self.status,
             'created_at': self.created_at.isoformat() + 'Z',
-            'checkpoints': [cp.to_dict() for cp in self.checkpoints]
+            'checkpoints': [cp.to_dict() for cp in self.checkpoints],
+            'history': [h.to_dict() for h in self.history]
         }
 
 class Checkpoint(db.Model):
@@ -179,15 +254,15 @@ class Checkpoint(db.Model):
             'note': self.note,
             'status': self.status,
             'proof_photo': self.proof_photo,
-            'timestamp': self.timestamp.isoformat() + 'Z'
+            'timestamp': self.timestamp.isoformat() + 'Z' if self.timestamp else None
         }
 
 class Subscriber(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     shipment_id = db.Column(db.Integer, db.ForeignKey('shipment.id'), nullable=False)
-    email = db.Column(db.String(120), nullable=True)
-    phone = db.Column(db.String(20), nullable=True)
+    email = db.Column(db.String(120), nullable=False)
     is_active = db.Column(db.Boolean, default=True)
+    __table_args__ = (db.UniqueConstraint('shipment_id', 'email', name='uix_shipment_email'),)
 
 class SimulationState(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -262,8 +337,8 @@ class ShipmentCreate(BaseModel):
     @validator('tracking_number')
     def check_tracking_number(cls, v):
         v = bleach.clean(v.strip())
-        if not v:
-            raise ValueError('Tracking number cannot be empty')
+        if not v or not re.match(r'^\d{10,12}$', v):
+            raise ValueError('Tracking number must be 10-12 digits')
         return v
 
     @validator('title')
@@ -289,138 +364,158 @@ class ShipmentCreate(BaseModel):
             raise ValueError(f"Status must be one of: {', '.join(status.value for status in ShipmentStatus)}")
         return v
 
-# Haversine formula for distance calculation
+# Helper functions
 def haversine(lat1, lon1, lat2, lon2):
     R = 6371  # Earth radius in km
     dlat = radians(lat2 - lat1)
     dlon = radians(lon2 - lon1)
     a = sin(dlat / 2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2)**2
     c = 2 * atan2(sqrt(a), sqrt(1 - a))
-    distance = R * c
-    return distance
+    return R * c
 
-def calculate_eta(distance_km, speed_kmh=50):
+def calculate_eta(distance_km, speed_kmh=None):
+    speed_kmh = speed_kmh or app.config['DEFAULT_SPEED_KMH']
     return timedelta(hours=distance_km / speed_kmh)
 
-# Geocoding function using Nominatim
-@cache.memoize(timeout=86400)
+@cache.memoize(timeout=3600)
 def geocode_address(address: str) -> Dict[str, float]:
+    for attempt in range(3):
+        try:
+            response = requests.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={"q": address, "format": "json", "limit": 1},
+                headers={"User-Agent": "CourierTrackingApp/1.0 (contact@yourdomain.com)"},
+                timeout=app.config['GEOCODING_TIMEOUT']
+            )
+            response.raise_for_status()
+            data = response.json()
+            if not data:
+                raise ValueError(f"Geocoding failed for address: {address}")
+            location = data[0]
+            return {"lat": float(location['lat']), "lng": float(location['lon'])}
+        except requests.RequestException as e:
+            logger.warning(f"Geocoding attempt {attempt + 1} failed for {address}: {e}")
+            if attempt == 2:
+                logger.error(f"Nominatim geocoding error: {e}")
+                raise ValueError(f"Failed to geocode address: {address}")
+            time.sleep(2 ** attempt)
+
+def compress_image(file_content, max_size=(800, 800), quality=None):
+    quality = quality or app.config['IMAGE_QUALITY']
     try:
-        response = requests.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={"q": address, "format": "json", "limit": 1},
-            headers={"User-Agent": "CourierTrackingApp/1.0 (contact@yourdomain.com)"},
-            timeout=5
+        img = Image.open(BytesIO(file_content))
+        if img.format not in ['JPEG', 'PNG']:
+            raise ValueError("Only JPEG or PNG images are supported")
+        if img.mode in ('RGBA', 'P'):
+            img = img.convert('RGB')
+        img.thumbnail(max_size, Image.Resampling.LANCZOS)
+        output = BytesIO()
+        img.save(output, format='JPEG', quality=quality, optimize=True)
+        compressed_content = output.getvalue()
+        if len(compressed_content) > app.config['MAX_FILE_SIZE']:
+            raise ValueError(f"Compressed image size ({len(compressed_content)} bytes) exceeds {app.config['MAX_FILE_SIZE']} bytes")
+        logger.debug(f"Compressed image from {len(file_content)} to {len(compressed_content)} bytes")
+        return compressed_content
+    except Exception as e:
+        logger.error(f"Image compression failed: {e}")
+        raise ValueError(f"Failed to compress image: {str(e)}")
+
+def upload_to_s3(file_content, filename):
+    if not all([app.config.get('AWS_ACCESS_KEY_ID'), app.config.get('AWS_SECRET_ACCESS_KEY'), app.config.get('S3_BUCKET')]):
+        logger.warning("S3 credentials not configured, skipping S3 upload")
+        return None
+    try:
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=app.config['AWS_ACCESS_KEY_ID'],
+            aws_secret_access_key=app.config['AWS_SECRET_ACCESS_KEY']
         )
-        response.raise_for_status()
-        data = response.json()
-        if not data:
-            raise ValueError(f"Geocoding failed for address: {address}")
-        location = data[0]
-        return {"lat": float(location['lat']), "lng": float(location['lon'])}
-    except requests.RequestException as e:
-        logger.error(f"Nominatim geocoding error: {e}")
-        raise ValueError(f"Failed to geocode address: {address}")
+        bucket = app.config['S3_BUCKET']
+        key = f"proof_photos/{secure_filename(filename)}"
+        s3_client.put_object(Bucket=bucket, Key=key, Body=file_content, ContentType='image/jpeg')
+        url = f"https://{bucket}.s3.amazonaws.com/{key}"
+        logger.info(f"Uploaded photo to S3: {url}")
+        return url
+    except ClientError as e:
+        logger.error(f"S3 upload failed: {e}")
+        return None
 
-# FedEx API Configuration
-FEDEX_API_URL = 'https://apis-sandbox.fedex.com/track/v1/trackingnumbers'  # Use 'https://apis.fedex.com' for production
-fedex_token_cache = {}
-
-def get_fedex_token():
-    """Get OAuth token for FedEx API."""
-    now = datetime.utcnow()
-    if 'token' in fedex_token_cache and (now - fedex_token_cache['expires']) < timedelta(minutes=50):
-        return fedex_token_cache['token']
-    
-    url = 'https://apis.fedex.com/oauth/token'
-    payload = 'grant_type=client_credentials&scope=track'
-    headers = {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Authorization': f'Basic {base64.b64encode(f"{app.config["FEDEX_CLIENT_ID"]}:{app.config["FEDEX_CLIENT_SECRET"]}".encode()).decode()}'
-    }
+def save_locally(file_content, filename):
     try:
-        response = requests.post(url, data=payload, headers=headers)
-        response.raise_for_status()
-        token_data = response.json()
-        fedex_token_cache['token'] = token_data['access_token']
-        fedex_token_cache['expires'] = now
-        return token_data['access_token']
-    except requests.RequestException as e:
-        logger.error(f"FedEx token fetch failed: {e}")
-        raise
+        upload_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'proof_photos')
+        os.makedirs(upload_dir, exist_ok=True)
+        file_path = os.path.join(upload_dir, secure_filename(filename))
+        with open(file_path, 'wb') as f:
+            f.write(file_content)
+        url = f"{app.config['APP_BASE_URL']}/{file_path}"
+        logger.info(f"Saved photo locally: {url}")
+        return url
+    except Exception as e:
+        logger.error(f"Local file save failed: {e}")
+        return None
 
-def track_fedex_shipment(tracking_number):
-    """Call FedEx Track API and return normalized data."""
-    if not app.config['FEDEX_CLIENT_ID'] or not app.config['FEDEX_CLIENT_SECRET']:
-        raise ValueError("FedEx credentials not configured.")
-    
-    token = get_fedex_token()
-    headers = {
-        'Authorization': f'Bearer {token}',
-        'Content-Type': 'application/json'
-    }
-    payload = {
-        "trackingInfo": [
-            {
-                "trackingNumberId": tracking_number
-            }
-        ],
-        "includeDetailedScans": 1,
-        "transactionContext": {
-            "transactionId": f"track-{tracking_number}-{int(datetime.utcnow().timestamp())}"
-        }
-    }
-    
-    try:
-        response = requests.post(FEDEX_API_URL, json=payload, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        
-        if not data.get('output', {}).get('completeTrackResults'):
-            raise ValueError("No tracking data found.")
-        
-        result = data['output']['completeTrackResults'][0]
-        track_info = result['trackResults'][0]
-        
-        shipment = {
-            'tracking': tracking_number,
-            'title': track_info.get('packageIdentifier', {}).get('value', 'FedEx Shipment'),
-            'status': track_info.get('latestStatus', {}).get('status', 'Unknown'),
-            'eta': track_info.get('estimatedDeliveryTimestamp', ''),
-            'distance_km': None,
-            'origin': {'lat': None, 'lng': None, 'address': track_info.get('shipperAddress', {}).get('addressLines', [''])[0] if track_info.get('shipperAddress') else ''},
-            'destination': {'lat': None, 'lng': None, 'address': track_info.get('deliveryAddress', {}).get('addressLines', [''])[0] if track_info.get('deliveryAddress') else ''},
-            'checkpoints': [],
-            'history': []
-        }
-        
-        for event in track_info.get('events', []):
-            checkpoint = {
-                'id': event.get('occurrenceTimestamp', ''),
-                'position': len(shipment['checkpoints']) + 1,
-                'lat': event.get('location', {}).get('latitude', None),
-                'lng': event.get('location', {}).get('longitude', None),
-                'label': event.get('eventDescription', ''),
-                'note': event.get('statusDescription', ''),
-                'status': event.get('eventCode', ''),
-                'timestamp': event.get('occurrenceTimestamp', '')
-            }
-            shipment['checkpoints'].append(checkpoint)
-        
-        for status in track_info.get('statusHistory', []):
-            history_entry = {
-                'status': status.get('status', ''),
-                'timestamp': status.get('timestamp', '')
-            }
-            shipment['history'].append(history_entry)
-        
-        return shipment
-    except requests.RequestException as e:
-        logger.error(f"FedEx API request failed: {e}")
-        raise
-    except (KeyError, ValueError) as e:
-        logger.error(f"FedEx API parsing failed: {e}")
-        raise
+def get_smtp_connection():
+    server = smtplib.SMTP(app.config['SMTP_HOST'], app.config['SMTP_PORT'], timeout=5)
+    server.starttls()
+    server.login(app.config['SMTP_USER'], app.config['SMTP_PASS'])
+    return server
+
+# Realistic simulation logic
+class RealisticSimulator:
+    @staticmethod
+    def geocode_with_fallback(address_or_coords: Union[str, Tuple[float, float]]) -> Tuple[float, float]:
+        if isinstance(address_or_coords, tuple):
+            return address_or_coords
+        cached = cache.get(f"geocode:{address_or_coords}")
+        if cached:
+            return cached['lat'], cached['lng']
+        try:
+            coords = geocode_address(address_or_coords)
+            cache.set(f"geocode:{address_or_coords}", coords, timeout=3600)
+            return coords['lat'], coords['lng']
+        except:
+            raise ValueError(f"Failed to geocode: {address_or_coords}")
+
+    @staticmethod
+    def get_realistic_route(origin: Tuple[float, float], destination: Tuple[float, float], profile: str = 'driving') -> List[Tuple[float, float]]:
+        if not app.config['OSRM_ENABLED']:
+            return RealisticSimulator.generate_linear_route(origin, destination)
+        try:
+            origin_ll = f"{origin[1]},{origin[0]}"  # OSRM expects lng,lat
+            dest_ll = f"{destination[1]},{destination[0]}"
+            url = f"{app.config['OSRM_URL']}/route/v1/{profile}/{origin_ll};{dest_ll}?overview=full&alternatives=false"
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            if 'routes' not in data or not data['routes']:
+                raise ValueError("No route found")
+            route = data['routes'][0]
+            coordinates = route['geometry']['coordinates']
+            max_points = app.config['MAX_WAYPOINTS']
+            step = max(1, len(coordinates) // max_points)
+            waypoints = [(lat, lng) for lng, lat in coordinates[::step]]
+            logger.info(f"Generated {len(waypoints)} realistic waypoints from OSRM")
+            return waypoints
+        except Exception as e:
+            logger.warning(f"OSRM route failed: {e}, falling back to linear")
+            return RealisticSimulator.generate_linear_route(origin, destination)
+
+    @staticmethod
+    def generate_linear_route(origin: Tuple[float, float], destination: Tuple[float, float], num_points: int = 15) -> List[Tuple[float, float]]:
+        waypoints = []
+        geod = Geodesic.WGS84
+        num_points = min(num_points, app.config['MAX_WAYPOINTS'])
+        for i in range(num_points + 1):
+            t = i / num_points
+            lat = origin[0] + t * (destination[0] - origin[0])
+            lng = origin[1] + t * (destination[1] - origin[1])
+            deviation = (1 - (t * (1 - t)) * 4) * 0.005 * random.uniform(0.5, 2.0)
+            bearing = geod.Inverse(origin[0], origin[1], destination[0], destination[1])['azi1']
+            perp_bearing = bearing + 90
+            perp_dist = deviation * random.uniform(0.7, 1.3)
+            new_pos = geod.Direct(lat, lng, perp_bearing, perp_dist)
+            waypoints.append((new_pos['lat2'], new_pos['lon2']))
+        return waypoints
 
 # Celery Tasks
 @shared_task(bind=True, max_retries=3, retry_backoff=2, retry_jitter=True)
@@ -435,7 +530,7 @@ def send_checkpoint_email_async(self, shipment_dict: dict, checkpoint_dict: dict
         msg['From'] = app.config['SMTP_FROM']
         msg['To'] = contact
 
-        text = f"""Courier Tracking Update
+        text = f"""DHL Tracking Update
 
 Shipment: {shipment_dict['title']} ({shipment_dict['tracking']})
 Status: {shipment_dict['status']}
@@ -445,12 +540,11 @@ Checkpoint:
 - Label: {checkpoint_dict['label']}
 - Location: ({checkpoint_dict['lat']:.4f}, {checkpoint_dict['lng']:.4f})
 - Note: {checkpoint_dict['note'] or 'None'}
+{f"- Photo: {checkpoint_dict['proof_photo']}" if checkpoint_dict['proof_photo'] else ""}
 
 Track: {app.config['APP_BASE_URL']}/track/{shipment_dict['tracking']}
 Unsubscribe: {app.config['APP_BASE_URL']}/unsubscribe/{shipment_dict['tracking']}?email={contact}
 """
-        text_part = MIMEText(text, 'plain')
-
         html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -462,7 +556,7 @@ Unsubscribe: {app.config['APP_BASE_URL']}/unsubscribe/{shipment_dict['tracking']
 <body class="bg-gray-100 font-sans">
     <div class="max-w-2xl mx-auto bg-white shadow-md rounded-lg overflow-hidden">
         <div class="bg-blue-600 text-white text-center py-4">
-            <img src="{app.config['APP_BASE_URL']}/static/logo.png" alt="Courier Logo" class="h-12 mx-auto" style="max-width: 150px;">
+            <img src="{app.config['APP_BASE_URL']}/static/dhl-logo.png" alt="DHL Logo" class="h-12 mx-auto" style="max-width: 150px;">
             <h1 class="text-2xl font-bold mt-2">Shipment Update</h1>
         </div>
         <div class="p-6">
@@ -476,6 +570,7 @@ Unsubscribe: {app.config['APP_BASE_URL']}/unsubscribe/{shipment_dict['tracking']
                 <p><span class="font-medium text-gray-700">Label:</span> {checkpoint_dict['label']}</p>
                 <p><span class="font-medium text-gray-700">Location:</span> ({checkpoint_dict['lat']:.4f}, {checkpoint_dict['lng']:.4f})</p>
                 <p><span class="font-medium text-gray-700">Note:</span> {checkpoint_dict['note'] or 'None'}</p>
+                {f'<p><span class="font-medium text-gray-700">Photo:</span> <a href="{checkpoint_dict["proof_photo"]}" class="text-blue-600 hover:underline">View</a></p>' if checkpoint_dict['proof_photo'] else ''}
             </div>
             <div class="mt-6 text-center">
                 <a href="{app.config['APP_BASE_URL']}/track/{shipment_dict['tracking']}" class="inline-block bg-blue-600 text-white font-semibold py-2 px-4 rounded hover:bg-blue-700">
@@ -486,65 +581,116 @@ Unsubscribe: {app.config['APP_BASE_URL']}/unsubscribe/{shipment_dict['tracking']
         <div class="bg-gray-200 text-gray-600 text-center py-4 text-sm">
             <p>You're receiving this email because you're subscribed to updates for this shipment.</p>
             <p><a href="{app.config['APP_BASE_URL']}/unsubscribe/{shipment_dict['tracking']}?email={contact}" class="text-blue-600 hover:underline">Unsubscribe</a></p>
-            <p>&copy; {datetime.now().year} Courier Tracking Service. All rights reserved.</p>
+            <p>&copy; {datetime.now().year} DHL Tracking Service. All rights reserved.</p>
         </div>
     </div>
 </body>
 </html>
 """
+        text_part = MIMEText(text, 'plain')
         html_part = MIMEText(html, 'html')
-
         msg.attach(text_part)
         msg.attach(html_part)
 
         @retry(tries=3, delay=2, backoff=2, exceptions=(smtplib.SMTPException, smtplib.SMTPServerDisconnected))
         def send_email():
+            server = get_smtp_connection()
             try:
-                server = get_smtp_connection()
                 server.send_message(msg)
-                logger.info(f"Sent email to {contact} for checkpoint {checkpoint_dict['id']} of shipment {shipment_dict['tracking']}")
-            except smtplib.SMTPAuthenticationError:
-                logger.error(f"SMTP authentication failed for {contact}")
-                raise
-            except smtplib.SMTPConnectError:
-                logger.error(f"SMTP connection failed for {contact}")
-                raise
-            except smtplib.SMTPException as e:
-                logger.error(f"SMTP error sending email to {contact}: {e}")
-                raise
+                logger.info(f"Sent email to {contact} for checkpoint {checkpoint_dict['id']}")
+            finally:
+                server.quit()
 
         send_email()
-    except smtplib.SMTPAuthenticationError:
-        logger.error(f"Authentication error sending email to {contact}")
-        raise self.retry(exc=Exception("SMTP authentication failed"))
-    except smtplib.SMTPConnectError:
-        logger.error(f"Connection error sending email to {contact}")
-        raise self.retry(exc=Exception("SMTP server unreachable"))
-    except smtplib.SMTPException as e:
-        logger.error(f"SMTP error sending email to {contact}: {e}")
-        raise self.retry(exc=e)
     except Exception as e:
-        logger.error(f"Unexpected error sending email to {contact}: {e}")
-        raise
+        logger.error(f"Email error for {contact}: {e}")
+        raise self.retry(exc=e)
 
-@shared_task(bind=True, max_retries=3, retry_backoff=2, retry_jitter=True)
-def send_checkpoint_sms_async(self, shipment_dict: dict, checkpoint_dict: dict, phone: str):
-    if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_PHONE_NUMBER):
-        return
+@shared_task(bind=True, max_retries=3)
+def run_enhanced_simulation(self, shipment_id, num_points=15, step_hours=2, use_realistic=True):
     try:
-        client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        message = client.messages.create(
-            body=f"Update for {shipment_dict['tracking']}: {checkpoint_dict['label']} at {checkpoint_dict['timestamp']}",
-            from_=TWILIO_PHONE_NUMBER,
-            to=phone
-        )
-        logger.info(f"Sent SMS to {phone} for checkpoint {checkpoint_dict['id']} of shipment {shipment_dict['tracking']}")
-    except TwilioRestException as e:
-        logger.error(f"Twilio error sending SMS to {phone}: {e}")
-        raise self.retry(exc=e)
+        shipment = Shipment.query.get(shipment_id)
+        if not shipment:
+            logger.error(f"Shipment {shipment_id} not found")
+            return
+
+        simulation_state = SimulationState.query.filter_by(shipment_id=shipment_id).first()
+        if simulation_state and simulation_state.status == 'running':
+            logger.info(f"Simulation already running for {shipment.tracking}")
+            return
+
+        origin = (shipment.origin_lat, shipment.origin_lng)
+        destination = (shipment.dest_lat, shipment.dest_lng)
+        waypoints = (RealisticSimulator.get_realistic_route(origin, destination)
+                     if use_realistic else RealisticSimulator.generate_linear_route(origin, destination, num_points))
+
+        if not simulation_state:
+            simulation_state = SimulationState(
+                shipment_id=shipment.id,
+                tracking=shipment.tracking,
+                status='running',
+                current_position=0,
+                waypoints=json.dumps(waypoints),
+                current_time=datetime.utcnow(),
+                num_points=len(waypoints) - 1,
+                step_hours=step_hours
+            )
+            db.session.add(simulation_state)
+        else:
+            simulation_state.waypoints = json.dumps(waypoints)
+            simulation_state.status = 'running'
+            simulation_state.current_position = 0
+        db.session.commit()
+
+        traffic_factor = random.uniform(1.0 - app.config['TRAFFIC_VARIABILITY'], 1.0 + app.config['TRAFFIC_VARIABILITY'])
+        statuses = [s.value for s in ShipmentStatus]
+        status_points = [0, len(waypoints)//3, len(waypoints)*2//3, len(waypoints)-1]
+        current_time = simulation_state.current_time
+
+        for i, (lat, lng) in enumerate(waypoints):
+            if simulation_state.status != 'running':
+                break
+            status = next((s for j, s in enumerate(statuses) if i >= status_points[j]), ShipmentStatus.IN_TRANSIT.value)
+            time_step = timedelta(hours=step_hours * traffic_factor)
+            checkpoint_time = current_time + time_step * (i / len(waypoints))
+
+            checkpoint = Checkpoint(
+                shipment_id=shipment.id,
+                position=i,
+                lat=lat,
+                lng=lng,
+                label=f"Route Point {i+1}/{len(waypoints)}",
+                note=f"Progress: {i/len(waypoints)*100:.1f}% - Traffic: {'Heavy' if traffic_factor > 1.2 else 'Normal'}",
+                status=status if i in status_points else None,
+                timestamp=checkpoint_time
+            )
+
+            with db.session.begin():
+                db.session.add(checkpoint)
+                if status and status != shipment.status:
+                    shipment.status = status
+                    db.session.add(StatusHistory(shipment=shipment, status=status))
+                    if status == ShipmentStatus.DELIVERED.value:
+                        shipment.eta = checkpoint_time
+                simulation_state.current_position = i
+                simulation_state.current_time = checkpoint_time
+
+            socketio.emit('update', shipment.to_dict(), room=shipment.tracking)
+            for subscriber in shipment.subscribers:
+                if subscriber.is_active:
+                    send_checkpoint_email_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.email)
+
+            current_time = checkpoint_time
+            socketio.sleep(random.uniform(1, 3))
+
+        if simulation_state.status == 'running':
+            simulation_state.status = 'completed'
+            db.session.commit()
+        logger.info(f"Simulation completed for {shipment.tracking}")
     except Exception as e:
-        logger.error(f"Unexpected error sending SMS to {phone}: {e}")
-        raise
+        logger.error(f"Simulation error for {shipment_id}: {e}")
+        db.session.rollback()
+        raise self.retry(exc=e)
 
 # Routes
 @app.route('/')
@@ -557,29 +703,29 @@ def login():
         if request.method == 'POST':
             password = request.form.get('password', '')
             if check_password_hash(app.config['ADMIN_PASSWORD_HASH'], password):
-                access_token = create_access_token(identity='admin')
-                response = redirect(url_for('admin'))
-                response.set_cookie('access_token', access_token, httponly=True, secure=True)
-                return response
+                session['is_admin'] = True
+                return redirect(url_for('admin'))
             return render_template('login.html', error='Invalid password'), 401
         return render_template('login.html')
     except Exception as e:
         logger.error(f"Login error: {e}")
-        return render_template('error.html', error='Login failed'), 400
+        return render_template('error.html', error='Login failed'), 500
+
+@app.route('/logout', methods=['GET', 'POST'])
+def logout():
+    session.pop('is_admin', None)
+    return redirect(url_for('login'))
 
 @app.route('/track', methods=['GET'])
 def track_redirect():
     try:
         tracking = bleach.clean(request.args.get('tracking', '').strip())
-        carrier = request.args.get('carrier', 'dhl')  # Add carrier param
         if tracking:
-            if carrier.lower() == 'fedex':
-                return redirect(url_for('fedex_track', tracking=tracking))
             return redirect(url_for('track', tracking=tracking))
         return render_template('error.html', error='Tracking number required'), 400
     except Exception as e:
         logger.error(f"Track redirect error: {e}")
-        return render_template('error.html', error='Failed to redirect to tracking'), 500
+        return render_template('error.html', error='Failed to redirect'), 500
 
 @app.route('/track/<tracking>')
 @cache.cached(timeout=300, query_string=True)
@@ -592,11 +738,10 @@ def track(tracking):
         if not shipment:
             return render_template('tracking.html', shipment=None), 404
         pagination = Checkpoint.query.filter_by(shipment_id=shipment.id).order_by(Checkpoint.position).paginate(page=page, per_page=per_page, error_out=False)
-        checkpoints = pagination.items
         history = [h.to_dict() for h in shipment.history]
-        return render_template('tracking.html', 
-                              shipment=shipment, 
-                              checkpoints=checkpoints, 
+        return render_template('tracking.html',
+                              shipment=shipment,
+                              checkpoints=pagination.items,
                               history=history,
                               origin_lat=shipment.origin_lat,
                               origin_lng=shipment.origin_lng,
@@ -607,57 +752,19 @@ def track(tracking):
         logger.error(f"Track error for {tracking}: {e}")
         return render_template('tracking.html', shipment=None, error='Failed to retrieve tracking data'), 500
 
-@app.route('/fedex/track/<tracking>')
-def fedex_track(tracking):
-    """Route for FedEx tracking, rendering tracking.html with API data."""
-    try:
-        tracking = bleach.clean(tracking.strip())
-        fedex_data = track_fedex_shipment(tracking)
-        return render_template('tracking.html',
-                              shipment=fedex_data,
-                              checkpoints=fedex_data['checkpoints'],
-                              history=fedex_data['history'],
-                              origin_lat=fedex_data['origin']['lat'],
-                              origin_lng=fedex_data['origin']['lng'],
-                              dest_lat=fedex_data['destination']['lat'],
-                              dest_lng=fedex_data['destination']['lng'])
-    except Exception as e:
-        logger.error(f"FedEx track error for {tracking}: {e}")
-        return render_template('tracking.html', shipment=None, error='Failed to retrieve FedEx tracking data'), 500
-
 @app.route('/admin', methods=['GET', 'POST'])
-@jwt_required()
+@admin_required
 def admin():
     try:
         shipments = Shipment.query.all()
         simulation_states = SimulationState.query.all()
-
-        if request.method == 'POST':
-            form_type = request.form.get('form_type')
-            try:
-                if form_type == 'shipment':
-                    return handle_shipment_form(request, shipments, simulation_states)
-                elif form_type == 'checkpoint':
-                    return handle_checkpoint_form(request, shipments, simulation_states)
-                elif form_type == 'simulation':
-                    return handle_simulation_form(request, shipments, simulation_states)
-                elif form_type == 'subscribe':
-                    return handle_subscribe_form(request, shipments, simulation_states)
-                elif form_type == 'track_multiple':
-                    return handle_track_multiple_form(request, shipments, simulation_states)
-                else:
-                    return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Invalid form type'), 400
-            except Exception as e:
-                logger.error(f"Admin form error: {e}")
-                return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error=str(e)), 500
-
         return render_template('admin.html', shipments=shipments, simulation_states=simulation_states)
     except Exception as e:
         logger.error(f"Admin dashboard error: {e}")
         return render_template('error.html', error='Failed to load admin dashboard'), 500
 
 @app.route('/pause_simulation/<tracking>', methods=['POST'])
-@jwt_required()
+@admin_required
 def pause_simulation(tracking):
     try:
         tracking = bleach.clean(tracking.strip())
@@ -666,20 +773,16 @@ def pause_simulation(tracking):
             return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Shipment not found'), 404
         simulation_state = SimulationState.query.filter_by(shipment_id=shipment.id).first()
         if not simulation_state or simulation_state.status != 'running':
-            return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='No active simulation to pause'), 400
+            return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='No active simulation'), 400
         with db.session.begin():
             simulation_state.status = 'paused'
         return redirect(url_for('admin'))
-    except SQLAlchemyError as e:
-        db.session.rollback()
-        logger.error(f"Database error in pause simulation: {e}")
-        return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Database error'), 500
     except Exception as e:
         logger.error(f"Pause simulation error for {tracking}: {e}")
         return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Failed to pause simulation'), 500
 
 @app.route('/continue_simulation/<tracking>', methods=['POST'])
-@jwt_required()
+@admin_required
 def continue_simulation(tracking):
     try:
         tracking = bleach.clean(tracking.strip())
@@ -688,60 +791,51 @@ def continue_simulation(tracking):
             return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Shipment not found'), 404
         simulation_state = SimulationState.query.filter_by(shipment_id=shipment.id).first()
         if not simulation_state or simulation_state.status != 'paused':
-            return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='No paused simulation to continue'), 400
+            return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='No paused simulation'), 400
         with db.session.begin():
             simulation_state.status = 'running'
-        run_simulation_async.delay(shipment.id, simulation_state.num_points, simulation_state.step_hours)
+        run_enhanced_simulation.delay(shipment.id, simulation_state.num_points, simulation_state.step_hours, app.config['OSRM_ENABLED'])
         return redirect(url_for('admin'))
-    except SQLAlchemyError as e:
-        db.session.rollback()
-        logger.error(f"Database error in continue simulation: {e}")
-        return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Database error'), 500
     except Exception as e:
         logger.error(f"Continue simulation error for {tracking}: {e}")
         return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Failed to continue simulation'), 500
 
-@app.route('/ping', methods=['GET'])
-@limiter.limit("1000 per day")
-def ping():
+@app.route('/shipments/<tracking>/simulate', methods=['POST'])
+@admin_required
+def run_simulation(tracking):
     try:
-        db.session.execute('SELECT 1')
-        return jsonify({'status': 'alive', 'timestamp': datetime.utcnow().isoformat() + 'Z'}), 200
+        tracking = bleach.clean(tracking.strip())
+        shipment = Shipment.query.filter_by(tracking=tracking).first()
+        if not shipment:
+            return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Shipment not found'), 404
+        simulation_state = SimulationState.query.filter_by(shipment_id=shipment.id).first()
+        if simulation_state and simulation_state.status == 'running':
+            return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Simulation already running'), 400
+        run_enhanced_simulation.delay(shipment.id, num_points=15, step_hours=2, use_realistic=app.config['OSRM_ENABLED'])
+        return redirect(url_for('admin'))
     except Exception as e:
-        logger.error(f"Ping failed: {e}")
-        return jsonify({'status': 'unhealthy'}), 500
-
-@app.route('/health')
-@limiter.limit("1000 per day")
-def health():
-    try:
-        db.session.execute('SELECT 1')
-        celery_status = celery.control.ping(timeout=1)
-        return jsonify({
-            'status': 'healthy',
-            'database': 'connected',
-            'celery': 'responsive' if celery_status else 'unresponsive',
-            'timestamp': datetime.utcnow().isoformat() + 'Z'
-        })
-    except SQLAlchemyError as e:
-        logger.error(f"Health check failed: {e}")
-        return jsonify({'status': 'unhealthy', 'database': 'disconnected'}), 500
-    except Exception as e:
-        logger.error(f"Health check exception: {e}")
-        return jsonify({'status': 'unhealthy'}), 500
+        logger.error(f"Simulation error for {tracking}: {e}")
+        return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Failed to run simulation'), 500
 
 @app.route('/shipments', methods=['GET'])
-@jwt_required()
+@admin_required
 def list_shipments():
     try:
-        shipments = Shipment.query.all()
-        return [s.to_dict() for s in shipments]
+        page = request.args.get('page', 1, type=int)
+        per_page = request.args.get('per_page', 20, type=int)
+        pagination = Shipment.query.paginate(page=page, per_page=per_page, error_out=False)
+        return jsonify({
+            'shipments': [s.to_dict() for s in pagination.items],
+            'page': pagination.page,
+            'pages': pagination.pages,
+            'total': pagination.total
+        })
     except Exception as e:
         logger.error(f"Shipment list error: {e}")
-        return {'error': 'Failed to retrieve shipments'}, 500
+        return jsonify({'error': 'Failed to retrieve shipments'}), 500
 
 @app.route('/shipments', methods=['POST'])
-@jwt_required()
+@admin_required
 def create_shipment():
     try:
         data = request.get_json() or request.form
@@ -778,37 +872,31 @@ def create_shipment():
         with db.session.begin():
             db.session.add(shipment)
             db.session.add(StatusHistory(shipment=shipment, status=shipment_data['status']))
-        socketio.emit('update', shipment.to_dict(), namespace='/', room=shipment.tracking)
+        socketio.emit('update', shipment.to_dict(), room=shipment.tracking)
         if request.form:
             return redirect(url_for('admin'))
-        return shipment.to_dict(), 201
+        return jsonify(shipment.to_dict()), 201
     except ValidationError as e:
+        error = str(e)
         if request.form:
-            return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error=str(e)), 400
-        return {'error': str(e)}, 400
-    except ValueError as e:
-        if request.form:
-            return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error=str(e)), 400
-        return {'error': str(e)}, 400
-    except IntegrityError:
-        db.session.rollback()
-        if request.form:
-            return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Tracking number already exists'), 409
-        return {'error': 'Tracking number already exists'}, 409
-    except SQLAlchemyError as e:
-        db.session.rollback()
-        logger.error(f"Database error in shipment creation: {e}")
-        if request.form:
-            return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Database error'), 500
-        return {'error': 'Database error'}, 500
+            return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error=error), 400
+        return jsonify({'error': error}), 400
     except Exception as e:
         logger.error(f"Shipment creation error: {e}")
+        error = 'Failed to create shipment'
+        if isinstance(e, IntegrityError):
+            error = 'Tracking number already exists'
+            db.session.rollback()
+            status = 409
+        else:
+            status = 500
         if request.form:
-            return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Failed to create shipment'), 500
-        return {'error': 'Failed to create shipment'}, 500
+            return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error=error), status
+        return jsonify({'error': error}), status
 
 @app.route('/shipments/<tracking>/checkpoints', methods=['POST'])
-@jwt_required()
+@admin_required
+@limiter.limit("50 per minute")
 def add_checkpoint(tracking):
     try:
         tracking = bleach.clean(tracking.strip())
@@ -816,10 +904,38 @@ def add_checkpoint(tracking):
         if not shipment:
             if request.form:
                 return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Shipment not found'), 404
-            return {'error': 'Shipment not found'}, 404
+            return jsonify({'error': 'Shipment not found'}), 404
         data = request.get_json() or request.form
         data = {k: bleach.clean(v.strip()) if isinstance(v, str) else v for k, v in data.items()}
-        checkpoint_data = CheckpointCreate(**data).dict()
+        proof_photo = None
+        if 'proof_photo' in request.files:
+            file = request.files['proof_photo']
+            if file and file.filename:
+                file_content = file.read()
+                if len(file_content) > app.config['MAX_FILE_SIZE']:
+                    error = 'Photo too large (max 10MB)'
+                    if request.form:
+                        return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error=error), 400
+                    return jsonify({'error': error}), 400
+                try:
+                    compressed_content = compress_image(file_content)
+                    filename = f"{tracking}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.jpg"
+                    proof_photo = upload_to_s3(compressed_content, filename) or save_locally(compressed_content, filename)
+                    if not proof_photo:
+                        error = 'Failed to store photo'
+                        if request.form:
+                            return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error=error), 500
+                        return jsonify({'error': error}), 500
+                except ValueError as e:
+                    if request.form:
+                        return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error=str(e)), 400
+                    return jsonify({'error': str(e)}), 400
+        else:
+            proof_photo = data.get('proof_photo')
+        checkpoint_data = CheckpointCreate(
+            **{k: v for k, v in data.items() if k != 'proof_photo'},
+            proof_photo=proof_photo
+        ).dict()
         if checkpoint_data['address']:
             coords = geocode_address(checkpoint_data['address'])
             lat, lng = coords['lat'], coords['lng']
@@ -834,7 +950,8 @@ def add_checkpoint(tracking):
             label=checkpoint_data['label'],
             note=checkpoint_data['note'],
             status=checkpoint_data['status'],
-            proof_photo=checkpoint_data.get('proof_photo')
+            proof_photo=checkpoint_data.get('proof_photo'),
+            timestamp=datetime.utcnow()
         )
         with db.session.begin():
             db.session.add(checkpoint)
@@ -843,390 +960,90 @@ def add_checkpoint(tracking):
                 db.session.add(StatusHistory(shipment=shipment, status=checkpoint_data['status']))
                 if shipment.status == ShipmentStatus.DELIVERED.value:
                     shipment.eta = checkpoint.timestamp
-        socketio.emit('update', shipment.to_dict(), namespace='/', room=tracking)
+        socketio.emit('update', shipment.to_dict(), room=shipment.tracking)
         for subscriber in shipment.subscribers:
-            if subscriber.is_active:
-                if subscriber.email:
-                    send_checkpoint_email_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.email)
-                if subscriber.phone:
-                    send_checkpoint_sms_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.phone)
+            if subscriber.is_active and subscriber.email:
+                send_checkpoint_email_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.email)
         if request.form:
             return redirect(url_for('admin'))
-        return checkpoint.to_dict(), 201
-    except ValidationError as e:
-        if request.form:
-            return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error=str(e)), 400
-        return {'error': str(e)}, 400
-    except ValueError as e:
-        if request.form:
-            return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error=str(e)), 400
-        return {'error': str(e)}, 400
-    except SQLAlchemyError as e:
-        db.session.rollback()
-        logger.error(f"Database error in checkpoint creation: {e}")
-        if request.form:
-            return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Database error'), 500
-        return {'error': 'Database error'}, 500
+        return jsonify(checkpoint.to_dict()), 201
     except Exception as e:
         logger.error(f"Checkpoint creation error for {tracking}: {e}")
+        error = 'Failed to add checkpoint'
+        status = 500
+        if isinstance(e, ValidationError):
+            error = str(e)
+            status = 400
+        elif isinstance(e, ValueError):
+            error = str(e)
+            status = 400
         if request.form:
-            return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Failed to add checkpoint'), 500
-        return {'error': 'Failed to add checkpoint'}, 500
+            return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error=error), status
+        return jsonify({'error': error}), status
 
 @app.route('/shipments/<tracking>/subscribe', methods=['POST'])
 def subscribe(tracking):
     try:
         tracking = bleach.clean(tracking.strip())
         data = request.get_json()
-        email = bleach.clean(data.get('email', '').strip()) if data.get('email') else None
-        phone = bleach.clean(data.get('phone', '').strip()) if data.get('phone') else None
-        if not email and not phone:
-            return {'error': 'Email or phone is required'}, 400
+        email = bleach.clean(data.get('email', '').strip())
+        if not email:
+            return jsonify({'error': 'Email is required'}), 400
         shipment = Shipment.query.filter_by(tracking=tracking).first()
         if not shipment:
-            return {'error': 'Shipment not found'}, 404
-        subscriber = Subscriber(shipment_id=shipment.id, email=email or '', phone=phone or '')
+            return jsonify({'error': 'Shipment not found'}), 404
+        subscriber = Subscriber(shipment_id=shipment.id, email=email)
         with db.session.begin():
             db.session.add(subscriber)
-        return {'message': 'Subscribed successfully'}, 201
+        return jsonify({'message': 'Subscribed successfully'}), 201
     except IntegrityError:
         db.session.rollback()
-        return {'error': 'Already subscribed'}, 409
-    except SQLAlchemyError as e:
-        db.session.rollback()
-        logger.error(f"Database error in subscription: {e}")
-        return {'error': 'Database error'}, 500
+        return jsonify({'error': 'Already subscribed'}), 409
     except Exception as e:
         logger.error(f"Subscription error for {tracking}: {e}")
-        return {'error': 'Failed to subscribe'}, 500
+        return jsonify({'error': 'Failed to subscribe'}), 500
 
 @app.route('/track_multiple', methods=['POST'])
 def track_multiple():
     try:
         tracking_numbers = [bleach.clean(tn.strip()) for tn in request.get_json() if tn.strip()]
         if not tracking_numbers:
-            return {'error': 'Tracking numbers required'}, 400
-        shipments = []
-        for tn in tracking_numbers:
-            shipment = Shipment.query.filter_by(tracking=tn).first()
-            if shipment:
-                shipments.append(shipment.to_dict())
-        return {'shipments': shipments}
+            return jsonify({'error': 'Tracking numbers required'}), 400
+        shipments = [s.to_dict() for s in Shipment.query.filter(Shipment.tracking.in_(tracking_numbers)).all()]
+        return jsonify({'shipments': shipments})
     except Exception as e:
         logger.error(f"Track multiple error: {e}")
-        return {'error': 'Failed to track shipments'}, 500
+        return jsonify({'error': 'Failed to track shipments'}), 500
 
-# Helper functions for admin route
-def handle_shipment_form(request, shipments, simulation_states):
+@app.route('/unsubscribe/<tracking>', methods=['GET'])
+def unsubscribe(tracking):
     try:
-        tracking = bleach.clean(request.form.get('tracking', '').strip())
-        title = bleach.clean(request.form.get('title', 'Consignment').strip())
-        origin = bleach.clean(request.form.get('origin', '').strip())
-        destination = bleach.clean(request.form.get('destination', '').strip())
-        status = request.form.get('status')
-
-        if not tracking or not origin or not destination or not status:
-            return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Missing required fields'), 400
-
-        if len(tracking) > 50 or len(title) > 100:
-            return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Tracking or title too long'), 400
-
-        if status not in [status.value for status in ShipmentStatus]:
-            return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Invalid status'), 400
-
-        data = {
-            'tracking_number': tracking,
-            'title': title,
-            'origin': origin,
-            'destination': destination,
-            'status': status
-        }
-        ShipmentCreate(**data)
-        if ',' in origin and all(x.replace('.', '').isdigit() for x in origin.split(',')):
-            origin_lat, origin_lng = map(float, origin.split(','))
-            origin_address = None
-        else:
-            coords = geocode_address(origin)
-            origin_lat, origin_lng = coords['lat'], coords['lng']
-            origin_address = origin
-        if ',' in destination and all(x.replace('.', '').isdigit() for x in destination.split(',')):
-            dest_lat, dest_lng = map(float, destination.split(','))
-            dest_address = None
-        else:
-            coords = geocode_address(destination)
-            dest_lat, dest_lng = coords['lat'], coords['lng']
-            dest_address = destination
-        shipment = Shipment(
-            tracking=tracking,
-            title=title,
-            origin_lat=origin_lat,
-            origin_lng=origin_lng,
-            dest_lat=dest_lat,
-            dest_lng=dest_lng,
-            origin_address=origin_address,
-            dest_address=dest_address,
-            status=status
-        )
-        shipment.calculate_distance_and_eta()
-        with db.session.begin():
-            db.session.add(shipment)
-            db.session.add(StatusHistory(shipment=shipment, status=status))
-        socketio.emit('update', shipment.to_dict(), namespace='/', room=shipment.tracking)
-        return redirect(url_for('admin'))
-    except ValidationError as e:
-        return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error=str(e)), 400
-    except ValueError as e:
-        return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error=str(e)), 400
-    except IntegrityError:
-        db.session.rollback()
-        return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Tracking number already exists'), 409
-    except SQLAlchemyError as e:
-        db.session.rollback()
-        logger.error(f"Database error in shipment creation: {e}")
-        return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Database error'), 500
-
-def handle_checkpoint_form(request, shipments, simulation_states):
-    try:
-        tracking = bleach.clean(request.form.get('tracking', '').strip())
-        location = bleach.clean(request.form.get('location', '').strip())
-        label = bleach.clean(request.form.get('label', '').strip())
-        note = bleach.clean(request.form.get('note', '').strip()) or None
-        status = request.form.get('status') or None
-        proof_photo = bleach.clean(request.form.get('proof_photo', '').strip()) or None
-
-        if not tracking or not location or not label:
-            return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Missing required fields'), 400
-
-        if len(tracking) > 50 or len(label) > 100 or (note and len(note) > 500) or (proof_photo and len(proof_photo) > 500):
-            return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Input too long'), 400
-
-        valid_statuses = ['', *list(status.value for status in ShipmentStatus)]
-        if status and status not in valid_statuses:
-            return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Invalid status'), 400
-
+        tracking = bleach.clean(tracking.strip())
+        email = bleach.clean(request.args.get('email', '').strip())
+        if not email:
+            return render_template('error.html', error='Email is required'), 400
         shipment = Shipment.query.filter_by(tracking=tracking).first()
         if not shipment:
-            return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Shipment not found'), 404
-
-        data = {
-            'address': location if ',' not in location else None,
-            'lat': float(location.split(',')[0]) if ',' in location and all(x.replace('.', '').isdigit() for x in location.split(',')) else None,
-            'lng': float(location.split(',')[1]) if ',' in location and all(x.replace('.', '').isdigit() for x in location.split(',')) else None,
-            'label': label,
-            'note': note,
-            'status': status,
-            'proof_photo': proof_photo
-        }
-        CheckpointCreate(**data)
-        if data['address']:
-            coords = geocode_address(data['address'])
-            lat, lng = coords['lat'], coords['lng']
-        else:
-            lat, lng = data['lat'], data['lng']
-        position = db.session.query(db.func.max(Checkpoint.position)).filter_by(shipment_id=shipment.id).scalar() or 0
-        checkpoint = Checkpoint(
-            shipment_id=shipment.id,
-            position=position + 1,
-            lat=lat,
-            lng=lng,
-            label=data['label'],
-            note=data['note'],
-            status=data['status'],
-            proof_photo=data['proof_photo']
-        )
+            return render_template('error.html', error='Shipment not found'), 404
+        subscriber = Subscriber.query.filter_by(shipment_id=shipment.id, email=email).first()
+        if not subscriber:
+            return render_template('error.html', error='Subscription not found'), 404
         with db.session.begin():
-            db.session.add(checkpoint)
-            if data['status']:
-                shipment.status = data['status']
-                db.session.add(StatusHistory(shipment=shipment, status=data['status']))
-                if shipment.status == ShipmentStatus.DELIVERED.value:
-                    shipment.eta = checkpoint.timestamp
-        socketio.emit('update', shipment.to_dict(), namespace='/', room=tracking)
-        for subscriber in shipment.subscribers:
-            if subscriber.is_active:
-                if subscriber.email:
-                    send_checkpoint_email_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.email)
-                if subscriber.phone:
-                    send_checkpoint_sms_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.phone)
-        return redirect(url_for('admin'))
-    except ValidationError as e:
-        return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error=str(e)), 400
-    except ValueError as e:
-        return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error=str(e)), 400
-    except SQLAlchemyError as e:
-        db.session.rollback()
-        logger.error(f"Database error in checkpoint creation: {e}")
-        return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Database error'), 500
-
-def handle_simulation_form(request, shipments, simulation_states):
-    try:
-        tracking = bleach.clean(request.form.get('tracking', '').strip())
-        num_points = request.form.get('num_points')
-        step_hours = request.form.get('step_hours')
-
-        if not tracking or not num_points or not step_hours:
-            return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Missing required fields'), 400
-
-        num_points = int(num_points)
-        step_hours = int(step_hours)
-        if num_points < 2 or num_points > 10 or step_hours < 1 or step_hours > 24:
-            return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Number of points must be 2-10, step hours must be 1-24'), 400
-
-        shipment = Shipment.query.filter_by(tracking=tracking).first()
-        if not shipment:
-            return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Shipment not found'), 404
-        if shipment.status == ShipmentStatus.DELIVERED.value:
-            return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Shipment already delivered'), 400
-        simulation_state = SimulationState.query.filter_by(shipment_id=shipment.id).first()
-        if simulation_state and simulation_state.status == 'running':
-            return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Simulation already running'), 400
-        run_simulation_async.delay(shipment.id, num_points, step_hours)
-        return redirect(url_for('admin'))
-    except ValueError as e:
-        return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error=str(e)), 400
-    except SQLAlchemyError as e:
-        db.session.rollback()
-        logger.error(f"Database error in simulation creation: {e}")
-        return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Database error'), 500
-
-def handle_subscribe_form(request, shipments, simulation_states):
-    try:
-        tracking = bleach.clean(request.form.get('tracking', '').strip())
-        email = bleach.clean(request.form.get('email', '').strip())
-        phone = bleach.clean(request.form.get('phone', '').strip()) or None
-
-        if not tracking or (not email and not phone):
-            return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Tracking number and either email or phone required'), 400
-
-        if len(tracking) > 50 or (email and len(email) > 120) or (phone and len(phone) > 20):
-            return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Input too long'), 400
-
-        shipment = Shipment.query.filter_by(tracking=tracking).first()
-        if not shipment:
-            return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Shipment not found'), 404
-
-        subscriber = Subscriber(shipment_id=shipment.id, email=email, phone=phone)
-        with db.session.begin():
-            db.session.add(subscriber)
-        return redirect(url_for('admin'))
-    except IntegrityError:
-        db.session.rollback()
-        return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Already subscribed'), 409
-    except SQLAlchemyError as e:
-        db.session.rollback()
-        logger.error(f"Database error in subscription: {e}")
-        return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Database error'), 500
-
-def handle_track_multiple_form(request, shipments, simulation_states):
-    try:
-        tracking_numbers = bleach.clean(request.form.get('tracking_numbers', '').strip())
-        if not tracking_numbers:
-            return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='At least one tracking number required'), 400
-
-        tracking_list = [tn.strip() for tn in tracking_numbers.split(',') if tn.strip()]
-        if not tracking_list:
-            return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='No valid tracking numbers provided'), 400
-
-        tracked_shipments = []
-        for tn in tracking_list:
-            shipment = Shipment.query.filter_by(tracking=tn).first()
-            if shipment:
-                tracked_shipments.append(shipment)
-        return render_template('track_multiple.html', tracked_shipments=tracked_shipments)
-    except SQLAlchemyError as e:
-        logger.error(f"Database error in track multiple: {e}")
-        return render_template('admin.html', shipments=shipments, simulation_states=simulation_states, error='Database error'), 500
-
-# Simulation logic
-def generate_waypoints(start_lat, start_lng, end_lat, end_lng, num_points):
-    waypoints = []
-    for i in range(num_points + 1):
-        t = i / num_points
-        lat = start_lat + t * (end_lat - start_lat)
-        lng = start_lng + t * (end_lng - start_lng)
-        deviation = random.uniform(-0.01, 0.01)
-        lat += deviation
-        lng += deviation
-        waypoints.append((lat, lng))
-    return waypoints
-
-@shared_task
-def run_simulation_async(shipment_id, num_points, step_hours):
-    try:
-        shipment = Shipment.query.get(shipment_id)
-        if not shipment:
-            logger.error(f"Shipment {shipment_id} not found for simulation")
-            return
-        simulation_state = SimulationState.query.filter_by(shipment_id=shipment_id).first()
-        start_position = simulation_state.current_position if simulation_state else 0
-        waypoints = json.loads(simulation_state.waypoints) if simulation_state else generate_waypoints(
-            shipment.origin_lat, shipment.origin_lng, shipment.dest_lat, shipment.dest_lng, num_points
-        )
-        current_time = simulation_state.current_time if simulation_state else datetime.utcnow()
-
-        if not simulation_state:
-            simulation_state = SimulationState(
-                shipment_id=shipment.id,
-                tracking=shipment.tracking,
-                status='running',
-                current_position=0,
-                waypoints=json.dumps(waypoints),
-                current_time=current_time,
-                num_points=num_points,
-                step_hours=step_hours
-            )
-            with db.session.begin():
-                db.session.add(simulation_state)
-
-        updates = []
-        statuses = [ShipmentStatus.IN_TRANSIT.value, ShipmentStatus.OUT_FOR_DELIVERY.value, ShipmentStatus.DELIVERED.value]
-        for i, (lat, lng) in enumerate(waypoints[start_position:], start_position + 1):
-            if simulation_state.status != 'running':
-                logger.info(f"Simulation paused or stopped for {shipment.tracking}")
-                break
-            status = statuses[min(i // (num_points // len(statuses)), len(statuses) - 1)] if i == num_points else None
-            checkpoint = Checkpoint(
-                shipment_id=shipment.id,
-                position=i,
-                lat=lat,
-                lng=lng,
-                label=f"Checkpoint {i}",
-                note=f"Simulated checkpoint at {current_time.isoformat()}",
-                status=status,
-                timestamp=current_time
-            )
-            with db.session.begin():
-                db.session.add(checkpoint)
-                if status and status != shipment.status:
-                    shipment.status = status
-                    db.session.add(StatusHistory(shipment=shipment, status=status))
-                    if shipment.status == ShipmentStatus.DELIVERED.value:
-                        shipment.eta = checkpoint.timestamp
-                simulation_state.current_position = i
-                simulation_state.current_time = current_time
-            updates.append(shipment.to_dict())
-            if len(updates) >= 5:
-                socketio.emit('update', updates[-1], namespace='/', room=shipment.tracking)
-                updates = []
-            for subscriber in shipment.subscribers:
-                if subscriber.is_active:
-                    if subscriber.email:
-                        send_checkpoint_email_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.email)
-                    if subscriber.phone:
-                        send_checkpoint_sms_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.phone)
-            current_time += timedelta(hours=step_hours)
-            socketio.sleep(1)  # Simulate delay
-        if updates:
-            socketio.emit('update', updates[-1], namespace='/', room=shipment.tracking)
-        if simulation_state.status == 'running':
-            with db.session.begin():
-                simulation_state.status = 'completed'
-        logger.info(f"Simulation completed for {shipment.tracking}")
-    except SQLAlchemyError as e:
-        db.session.rollback()
-        logger.error(f"Database error in simulation for {shipment_id}: {e}")
+            subscriber.is_active = False
+        return render_template('error.html', error='Unsubscribed successfully'), 200
     except Exception as e:
-        logger.error(f"Simulation error for {shipment_id}: {e}")
+        logger.error(f"Unsubscribe error for {tracking}: {e}")
+        return render_template('error.html', error='Failed to unsubscribe'), 500
+
+# Socket.IO Events
+@socketio.on('subscribe')
+def handle_subscribe(tracking):
+    join_room(tracking)
+    logger.info(f"Client subscribed to updates for {tracking}")
+
+# Initialize Database
+with app.app_context():
+    db.create_all()
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
+    socketio.run(app, debug=True, host='0.0.0.0', port=5000)
