@@ -457,10 +457,10 @@
 </head>
 <body>
     <div class="header">
-        <img src="/static/dhl-logo.png" alt="DHL Logo">
-        <div class="menu" aria-label="Toggle navigation menu">≡</div>
-        <div class="menu-content">
-            <a href="#">Home</a>
+        <img src="{{ url_for('static', filename='dhl-logo.png') }}" alt="DHL Logo">
+        <div class="menu" aria-label="Toggle navigation menu" aria-expanded="false" aria-controls="menu-content">≡</div>
+        <div id="menu-content" class="menu-content hidden">
+            <a href="{{ url_for('index') }}">Home</a>
             <a href="#">Contact</a>
             <a href="#">Help</a>
         </div>
@@ -474,23 +474,23 @@
                 <label for="subscribeEmail" class="mt-4">Email (optional, for updates)</label>
                 <input type="email" id="subscribeEmail" placeholder="Enter your email">
                 <button type="submit">Track <span class="spinner"></span></button>
-                <div id="result" class="tracking-result"></div>
+                <div id="result" class="tracking-result" role="alert"></div>
             </form>
         </div>
     </div>
     <div class="faq-section">
         <h2 class="text-2xl font-semibold mb-4">Frequently Asked Questions</h2>
         <div class="faq-item">
-            <a href="#" onclick="toggleFAQ('faq1')" class="text-red-600 hover:underline">What Is a Tracking Number & Where Can I Find It?</a>
-            <div id="faq1" class="text-gray-600 mt-2">A tracking number is a unique ID assigned to your shipment, found on your shipping confirmation email or receipt.</div>
+            <a href="#" onclick="toggleFAQ('faq1')" class="text-red-600 hover:underline" aria-expanded="false" aria-controls="faq1">What Is a Tracking Number & Where Can I Find It?</a>
+            <div id="faq1" class="text-gray-600 mt-2 hidden">A tracking number is a unique ID assigned to your shipment, found on your shipping confirmation email or receipt.</div>
         </div>
         <div class="faq-item">
-            <a href="#" onclick="toggleFAQ('faq2')" class="text-red-600 hover:underline">When will my tracking information appear?</a>
-            <div id="faq2" class="text-gray-600 mt-2">Tracking information typically appears within 24 hours after your shipment is processed.</div>
+            <a href="#" onclick="toggleFAQ('faq2')" class="text-red-600 hover:underline" aria-expanded="false" aria-controls="faq2">When will my tracking information appear?</a>
+            <div id="faq2" class="text-gray-600 mt-2 hidden">Tracking information typically appears within 24 hours after your shipment is processed.</div>
         </div>
         <div class="faq-item">
-            <a href="#" onclick="toggleFAQ('faq3')" class="text-red-600 hover:underline">Why is my tracking number/ID not working?</a>
-            <div id="faq3" class="text-gray-600 mt-2">Ensure the number is correct or contact customer support if issues persist.</div>
+            <a href="#" onclick="toggleFAQ('faq3')" class="text-red-600 hover:underline" aria-expanded="false" aria-controls="faq3">Why is my tracking number/ID not working?</a>
+            <div id="faq3" class="text-gray-600 mt-2 hidden">Ensure the number is correct or contact customer support if issues persist.</div>
         </div>
     </div>
     <div class="footer">
@@ -548,7 +548,7 @@
 
         // Handle Form Submission
         async function handleSubmit(e) {
-            e.preventDefault();
+            e.prevent_request();
             const tracking = document.getElementById('trackingInput').value;
             const email = document.getElementById('subscribeEmail').value;
             const result = document.getElementById('result');
@@ -577,12 +577,10 @@
                 }
             }
 
-            // Show spinner and disable button if email is provided
-            if (email) {
-                button.disabled = true;
-                button.textContent = 'Processing...';
-                spinner.style.display = 'inline-block';
-            }
+            // Show spinner and disable button
+            button.disabled = true;
+            button.textContent = 'Processing...';
+            spinner.style.display = 'inline-block';
 
             // Subscribe if email is provided
             if (email) {
@@ -603,11 +601,6 @@
                 } catch (error) {
                     result.textContent = 'Error subscribing to updates. Proceeding to tracking...';
                     result.style.display = 'block';
-                } finally {
-                    // Hide spinner and re-enable button
-                    button.disabled = false;
-                    button.textContent = 'Track';
-                    spinner.style.display = 'none';
                 }
             }
 
