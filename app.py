@@ -10,7 +10,7 @@ from typing import Dict, Union, Optional as TypingOptional, List, Tuple
 from packaging import version
 import validators
 import requests
-from flask import Flask, request, jsonify, render_template, redirect, url_for, session, abort
+from flask import Flask, request, jsonify, render_template, redirect, url_for, session, abort, flash
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_sqlalchemy import SQLAlchemy
@@ -37,7 +37,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 # Initialize Flask app
-app = Flask(__name__, template_folder='templates', static_folder='static')
+app = Flask(__name__, template_folder='templates')
 
 # Configuration class with validation
 class Settings(BaseModel):
@@ -55,7 +55,7 @@ class Settings(BaseModel):
     ADMIN_EMAIL: str
     ADMIN_PHONE: str
     TELEGRAM_TOKEN: str
-    ADMIN_PASSWORD: str = "Biggerboy"  # Default hardcoded password
+    ADMIN_PASSWORD: str = "Biggerboy"
     AWS_ACCESS_KEY_ID: TypingOptional[str] = None
     AWS_SECRET_ACCESS_KEY: TypingOptional[str] = None
     S3_BUCKET: TypingOptional[str] = None
@@ -138,7 +138,6 @@ try:
     for key, value in settings.dict().items():
         if value is not None:
             app.config[key] = value
-    # Hash the admin password for secure comparison
     app.config['ADMIN_PASSWORD_HASH'] = generate_password_hash(app.config['ADMIN_PASSWORD'])
 except Exception as e:
     logger.error(f"Startup validation failed: {e}")
@@ -174,7 +173,7 @@ class ShipmentStatus(Enum):
 # Authentication decorator
 def admin_required(f):
     def wrap(*args, **kwargs):
-        if not session.get('is_admin'):
+        if not session.get('authenticated'):
             abort(401)  # Unauthorized
         return f(*args, **kwargs)
     wrap.__name__ = f.__name__
@@ -227,8 +226,7 @@ class Shipment(db.Model):
             'eta': self.eta.isoformat() + 'Z' if self.eta else None,
             'status': self.status,
             'created_at': self.created_at.isoformat() + 'Z',
-            'checkpoints': [cp.to_dict() for cp in self.checkpoints],
-            'history': [h.to_dict() for h in self.history]
+            'checkpoints': [cp.to_dict() for cp in self.checkpoints]
         }
 
 class Checkpoint(db.Model):
@@ -254,7 +252,7 @@ class Checkpoint(db.Model):
             'note': self.note,
             'status': self.status,
             'proof_photo': self.proof_photo,
-            'timestamp': self.timestamp.isoformat() + 'Z' if self.timestamp else None
+            'timestamp': self.timestamp.isoformat() + 'Z'
         }
 
 class Subscriber(db.Model):
@@ -262,7 +260,6 @@ class Subscriber(db.Model):
     shipment_id = db.Column(db.Integer, db.ForeignKey('shipment.id'), nullable=False)
     email = db.Column(db.String(120), nullable=False)
     is_active = db.Column(db.Boolean, default=True)
-    __table_args__ = (db.UniqueConstraint('shipment_id', 'email', name='uix_shipment_email'),)
 
 class SimulationState(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -530,7 +527,7 @@ def send_checkpoint_email_async(self, shipment_dict: dict, checkpoint_dict: dict
         msg['From'] = app.config['SMTP_FROM']
         msg['To'] = contact
 
-        text = f"""DHL Tracking Update
+        text = f"""Courier Tracking Update
 
 Shipment: {shipment_dict['title']} ({shipment_dict['tracking']})
 Status: {shipment_dict['status']}
@@ -556,7 +553,7 @@ Unsubscribe: {app.config['APP_BASE_URL']}/unsubscribe/{shipment_dict['tracking']
 <body class="bg-gray-100 font-sans">
     <div class="max-w-2xl mx-auto bg-white shadow-md rounded-lg overflow-hidden">
         <div class="bg-blue-600 text-white text-center py-4">
-            <img src="{app.config['APP_BASE_URL']}/static/dhl-logo.png" alt="DHL Logo" class="h-12 mx-auto" style="max-width: 150px;">
+            <img src="{app.config['APP_BASE_URL']}/static/logo.png" alt="Courier Logo" class="h-12 mx-auto" style="max-width: 150px;">
             <h1 class="text-2xl font-bold mt-2">Shipment Update</h1>
         </div>
         <div class="p-6">
@@ -581,7 +578,7 @@ Unsubscribe: {app.config['APP_BASE_URL']}/unsubscribe/{shipment_dict['tracking']
         <div class="bg-gray-200 text-gray-600 text-center py-4 text-sm">
             <p>You're receiving this email because you're subscribed to updates for this shipment.</p>
             <p><a href="{app.config['APP_BASE_URL']}/unsubscribe/{shipment_dict['tracking']}?email={contact}" class="text-blue-600 hover:underline">Unsubscribe</a></p>
-            <p>&copy; {datetime.now().year} DHL Tracking Service. All rights reserved.</p>
+            <p>&copy; {datetime.now().year} Courier Tracking Service. All rights reserved.</p>
         </div>
     </div>
 </body>
@@ -703,7 +700,7 @@ def login():
         if request.method == 'POST':
             password = request.form.get('password', '')
             if check_password_hash(app.config['ADMIN_PASSWORD_HASH'], password):
-                session['is_admin'] = True
+                session['authenticated'] = True
                 return redirect(url_for('admin'))
             return render_template('login.html', error='Invalid password'), 401
         return render_template('login.html')
@@ -713,7 +710,7 @@ def login():
 
 @app.route('/logout', methods=['GET', 'POST'])
 def logout():
-    session.pop('is_admin', None)
+    session.pop('authenticated', None)
     return redirect(url_for('login'))
 
 @app.route('/track', methods=['GET'])
@@ -758,10 +755,192 @@ def admin():
     try:
         shipments = Shipment.query.all()
         simulation_states = SimulationState.query.all()
+        if request.method == 'POST':
+            form_type = request.form.get('form_type')
+            if form_type == 'shipment':
+                return handle_shipment_form()
+            elif form_type == 'checkpoint':
+                return handle_checkpoint_form()
+            elif form_type = 'simulation':
+                return handle_simulation_form()
+            elif form_type == 'subscribe':
+                return handle_subscribe_form()
+            elif form_type == 'track_multiple':
+                return handle_track_multiple_form()
+            return jsonify({'error': 'Invalid form type'}), 400
         return render_template('admin.html', shipments=shipments, simulation_states=simulation_states)
     except Exception as e:
         logger.error(f"Admin dashboard error: {e}")
         return render_template('error.html', error='Failed to load admin dashboard'), 500
+
+def handle_shipment_form():
+    try:
+        data = request.form
+        shipment_data = ShipmentCreate(
+            tracking_number=data['tracking'],
+            title=data['title'],
+            origin=data['origin'],
+            destination=data['destination'],
+            status=data['status']
+        ).dict()
+        origin = shipment_data['origin']
+        destination = shipment_data['destination']
+        if isinstance(origin, str):
+            coords = geocode_address(origin)
+            origin_lat, origin_lng = coords['lat'], coords['lng']
+            origin_address = origin
+        else:
+            origin_lat, origin_lng = origin['lat'], origin['lng']
+            origin_address = None
+        if isinstance(destination, str):
+            coords = geocode_address(destination)
+            dest_lat, dest_lng = coords['lat'], coords['lng']
+            dest_address = destination
+        else:
+            dest_lat, dest_lng = destination['lat'], destination['lng']
+            dest_address = None
+        shipment = Shipment(
+            tracking=shipment_data['tracking_number'],
+            title=shipment_data['title'],
+            origin_lat=origin_lat,
+            origin_lng=origin_lng,
+            dest_lat=dest_lat,
+            dest_lng=dest_lng,
+            origin_address=origin_address,
+            dest_address=dest_address,
+            status=shipment_data['status']
+        )
+        shipment.calculate_distance_and_eta()
+        with db.session.begin():
+            db.session.add(shipment)
+            db.session.add(StatusHistory(shipment=shipment, status=shipment_data['status']))
+        socketio.emit('update', shipment.to_dict(), room=shipment.tracking)
+        flash('Shipment created successfully!', 'success')
+        return jsonify({'message': 'Shipment created successfully!'}), 201
+    except ValidationError as e:
+        flash(str(e), 'error')
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Shipment creation error: {e}")
+        flash('Failed to create shipment', 'error')
+        return jsonify({'error': 'Failed to create shipment'}), 500
+
+def handle_checkpoint_form():
+    try:
+        data = request.form
+        tracking = data['tracking']
+        shipment = Shipment.query.filter_by(tracking=tracking).first()
+        if not shipment:
+            flash('Shipment not found', 'error')
+            return jsonify({'error': 'Shipment not found'}), 404
+        checkpoint_data = CheckpointCreate(
+            address=data['location'] if ',' not in data['location'] else None,
+            lat=float(data['location'].split(',')[0]) if ',' in data['location'] else None,
+            lng=float(data['location'].split(',')[1]) if ',' in data['location'] else None,
+            label=data['label'],
+            note=data['note'],
+            status=data['status'] if data['status'] else None,
+            proof_photo=data['proof_photo'] if data['proof_photo'] else None
+        ).dict()
+        if checkpoint_data['address']:
+            coords = geocode_address(checkpoint_data['address'])
+            lat, lng = coords['lat'], coords['lng']
+        else:
+            lat, lng = checkpoint_data['lat'], checkpoint_data['lng']
+        position = db.session.query(db.func.max(Checkpoint.position)).filter_by(shipment_id=shipment.id).scalar() or 0
+        checkpoint = Checkpoint(
+            shipment_id=shipment.id,
+            position=position + 1,
+            lat=lat,
+            lng=lng,
+            label=checkpoint_data['label'],
+            note=checkpoint_data['note'],
+            status=checkpoint_data['status'],
+            proof_photo=checkpoint_data.get('proof_photo')
+        )
+        with db.session.begin():
+            db.session.add(checkpoint)
+            if checkpoint_data['status']:
+                shipment.status = checkpoint_data['status']
+                db.session.add(StatusHistory(shipment=shipment, status=checkpoint_data['status']))
+                if shipment.status == ShipmentStatus.DELIVERED.value:
+                    shipment.eta = checkpoint.timestamp
+        socketio.emit('update', shipment.to_dict(), room=shipment.tracking)
+        for subscriber in shipment.subscribers:
+            if subscriber.is_active and subscriber.email:
+                send_checkpoint_email_async.delay(shipment.to_dict(), checkpoint.to_dict(), subscriber.email)
+        flash('Checkpoint added successfully!', 'success')
+        return jsonify({'message': 'Checkpoint added successfully!'}), 201
+    except ValidationError as e:
+        flash(str(e), 'error')
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Checkpoint creation error: {e}")
+        flash('Failed to add checkpoint', 'error')
+        return jsonify({'error': 'Failed to add checkpoint'}), 500
+
+def handle_simulation_form():
+    try:
+        data = request.form
+        tracking = data['tracking']
+        num_points = int(data['num_points'])
+        step_hours = int(data['step_hours'])
+        shipment = Shipment.query.filter_by(tracking=tracking).first()
+        if not shipment:
+            flash('Shipment not found', 'error')
+            return jsonify({'error': 'Shipment not found'}), 404
+        simulation_state = SimulationState.query.filter_by(shipment_id=shipment.id).first()
+        if simulation_state and simulation_state.status == 'running':
+            flash('Simulation already running', 'error')
+            return jsonify({'error': 'Simulation already running'}), 400
+        run_enhanced_simulation.delay(shipment.id, num_points=num_points, step_hours=step_hours, use_realistic=app.config['OSRM_ENABLED'])
+        flash('Simulation started successfully!', 'success')
+        return jsonify({'message': 'Simulation started successfully!'}), 200
+    except ValueError as e:
+        flash(str(e), 'error')
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Simulation error: {e}")
+        flash('Failed to start simulation', 'error')
+        return jsonify({'error': 'Failed to start simulation'}), 500
+
+def handle_subscribe_form():
+    try:
+        data = request.form
+        tracking = data['tracking']
+        email = data['email']
+        shipment = Shipment.query.filter_by(tracking=tracking).first()
+        if not shipment:
+            flash('Shipment not found', 'error')
+            return jsonify({'error': 'Shipment not found'}), 404
+        subscriber = Subscriber(shipment_id=shipment.id, email=email)
+        with db.session.begin():
+            db.session.add(subscriber)
+        flash('Subscribed successfully!', 'success')
+        return jsonify({'message': 'Subscribed successfully!'}), 201
+    except IntegrityError:
+        db.session.rollback()
+        flash('Already subscribed', 'error')
+        return jsonify({'error': 'Already subscribed'}), 409
+    except Exception as e:
+        logger.error(f"Subscription error: {e}")
+        flash('Failed to subscribe', 'error')
+        return jsonify({'error': 'Failed to subscribe'}), 500
+
+def handle_track_multiple_form():
+    try:
+        data = request.form
+        tracking_numbers = [bleach.clean(tn.strip()) for tn in data['tracking_numbers'].split(',') if tn.strip()]
+        if not tracking_numbers:
+            flash('Tracking numbers required', 'error')
+            return jsonify({'error': 'Tracking numbers required'}), 400
+        shipments = [s.to_dict() for s in Shipment.query.filter(Shipment.tracking.in_(tracking_numbers)).all()]
+        flash('Shipments tracked successfully!', 'success')
+        return jsonify({'shipments': shipments}), 200
+    except Exception as e:
+        logger.error(f"Track multiple error: {e}")
+        flash('Failed to track shipments', 'error')
+        return jsonify({'error': 'Failed to track shipments'}), 500
 
 @app.route('/pause_simulation/<tracking>', methods=['POST'])
 @admin_required
@@ -800,23 +979,6 @@ def continue_simulation(tracking):
         logger.error(f"Continue simulation error for {tracking}: {e}")
         return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Failed to continue simulation'), 500
 
-@app.route('/shipments/<tracking>/simulate', methods=['POST'])
-@admin_required
-def run_simulation(tracking):
-    try:
-        tracking = bleach.clean(tracking.strip())
-        shipment = Shipment.query.filter_by(tracking=tracking).first()
-        if not shipment:
-            return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Shipment not found'), 404
-        simulation_state = SimulationState.query.filter_by(shipment_id=shipment.id).first()
-        if simulation_state and simulation_state.status == 'running':
-            return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Simulation already running'), 400
-        run_enhanced_simulation.delay(shipment.id, num_points=15, step_hours=2, use_realistic=app.config['OSRM_ENABLED'])
-        return redirect(url_for('admin'))
-    except Exception as e:
-        logger.error(f"Simulation error for {tracking}: {e}")
-        return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Failed to run simulation'), 500
-
 @app.route('/shipments', methods=['GET'])
 @admin_required
 def list_shipments():
@@ -833,6 +995,23 @@ def list_shipments():
     except Exception as e:
         logger.error(f"Shipment list error: {e}")
         return jsonify({'error': 'Failed to retrieve shipments'}), 500
+
+@app.route('/shipments/<tracking>/simulate', methods=['POST'])
+@admin_required
+def run_simulation(tracking):
+    try:
+        tracking = bleach.clean(tracking.strip())
+        shipment = Shipment.query.filter_by(tracking=tracking).first()
+        if not shipment:
+            return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Shipment not found'), 404
+        simulation_state = SimulationState.query.filter_by(shipment_id=shipment.id).first()
+        if simulation_state and simulation_state.status == 'running':
+            return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Simulation already running'), 400
+        run_enhanced_simulation.delay(shipment.id, num_points=15, step_hours=2, use_realistic=app.config['OSRM_ENABLED'])
+        return redirect(url_for('admin'))
+    except Exception as e:
+        logger.error(f"Simulation error for {tracking}: {e}")
+        return render_template('admin.html', shipments=Shipment.query.all(), simulation_states=SimulationState.query.all(), error='Failed to run simulation'), 500
 
 @app.route('/shipments', methods=['POST'])
 @admin_required
@@ -950,8 +1129,7 @@ def add_checkpoint(tracking):
             label=checkpoint_data['label'],
             note=checkpoint_data['note'],
             status=checkpoint_data['status'],
-            proof_photo=checkpoint_data.get('proof_photo'),
-            timestamp=datetime.utcnow()
+            proof_photo=checkpoint_data.get('proof_photo')
         )
         with db.session.begin():
             db.session.add(checkpoint)
@@ -1015,26 +1193,6 @@ def track_multiple():
         logger.error(f"Track multiple error: {e}")
         return jsonify({'error': 'Failed to track shipments'}), 500
 
-@app.route('/unsubscribe/<tracking>', methods=['GET'])
-def unsubscribe(tracking):
-    try:
-        tracking = bleach.clean(tracking.strip())
-        email = bleach.clean(request.args.get('email', '').strip())
-        if not email:
-            return render_template('error.html', error='Email is required'), 400
-        shipment = Shipment.query.filter_by(tracking=tracking).first()
-        if not shipment:
-            return render_template('error.html', error='Shipment not found'), 404
-        subscriber = Subscriber.query.filter_by(shipment_id=shipment.id, email=email).first()
-        if not subscriber:
-            return render_template('error.html', error='Subscription not found'), 404
-        with db.session.begin():
-            subscriber.is_active = False
-        return render_template('error.html', error='Unsubscribed successfully'), 200
-    except Exception as e:
-        logger.error(f"Unsubscribe error for {tracking}: {e}")
-        return render_template('error.html', error='Failed to unsubscribe'), 500
-
 # Socket.IO Events
 @socketio.on('subscribe')
 def handle_subscribe(tracking):
@@ -1046,4 +1204,4 @@ with app.app_context():
     db.create_all()
 
 if __name__ == '__main__':
-    socketio.run(app, debug=True, host='0.0.0.0', port=5000)
+    socketio.run(app, debug=True)
