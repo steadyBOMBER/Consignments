@@ -13,7 +13,7 @@
     <!-- Socket.IO -->
     <script src="https://cdn.socket.io/4.7.5/socket.io.min.js" integrity="sha384-2huaZv1p4dt2ZUXEW8sx4aeVBL1rQe01U6FjPaUrRaN8S7XjLHkAjw6UTy5T3gv3" crossorigin="anonymous"></script>
     <!-- Day.js and plugins -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/dayjs/1.11.10/dayjs.min.js" integrity="sha512-FwZ0+5IpG/gj1LHgrVCeGYZ2ddy1k94mU3fA8DRhC3xQfDuXgac7uK1o9gH6Z8vHZmzvH0wY8NsuQ/3nF5I2ug==" crossorigin=""></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dayjs/1.11.10/dayjs.min.js" integrity="sha512-FwZ0+5IpG/gj1LHgrVCeGYZ2ddy1k94mU3fA8DRhC3xQfF3L2E5qQ6kyf3Nmb+Mn2c1Zp3nW+kwg==" crossorigin=""></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/dayjs/1.11.10/plugin/utc.min.js" integrity="sha512-2jN5tV4jsz/d2WV6eKXxk3+1nPgcZf7YcRmsI3k3//RGZmVWSrQVRzS0/3h6/TeQBw2Nvb2IxmGhV2+5Arf2VoA==" crossorigin=""></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/dayjs/1.11.10/plugin/timezone.min.js" integrity="sha512-nZ73bLja2fQh6y8wW1x+66OnF2tSQi7F01c2yXzN3ONTh6EG3pPjX8fF3L2E5qQ6kyf3Nmb+Mn2c1Zp3nW+kwg==" crossorigin=""></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/dayjs/1.11.10/plugin/customParseFormat.min.js" integrity="sha512-kV29i1JlwA6 Pagan4aKvaD8Z5G4ERx4oYpFXiI5Ph6Fo8v+2kNoKpeYQUg41sWoV7urdK4A9TJvoQ2jBraK5rA==" crossorigin=""></script>
@@ -96,7 +96,7 @@
             transition: background-color 0.3s ease;
             position: relative;
         }
-        .subscribe-box button:hover {
+        .subscribe-box button:hover:not(:disabled) {
             background-color: #b71c1c;
         }
         .subscribe-box button:disabled {
@@ -120,7 +120,60 @@
             0% { transform: translate(-50%, -50%) rotate(0deg); }
             100% { transform: translate(-50%, -50%) rotate(360deg); }
         }
-        /* Responsive Design */
+        .form-result {
+            margin-top: 1rem;
+            padding: 0.5rem;
+            border-radius: 5px;
+            font-size: 0.875rem;
+            display: none;
+        }
+        .form-result.success {
+            background: #d4edda;
+            color: #155724;
+        }
+        .form-result.error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .footer {
+            background: #f5f5f5;
+            padding: 20px;
+            margin-top: 20px;
+        }
+        .footer-content {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 20px;
+        }
+        .copyright {
+            text-align: center;
+            margin-top: 20px;
+            font-size: 14px;
+            color: #666;
+        }
+        .footer-section h3 {
+            margin-bottom: 10px;
+        }
+        .footer-section a {
+            display: block;
+            margin-bottom: 5px;
+            color: #d32f2f;
+            text-decoration: none;
+        }
+        .footer-section a:hover {
+            text-decoration: underline;
+        }
+        .admin-dot {
+            display: block;
+            width: 10px;
+            height: 10px;
+            background: red;
+            border-radius: 50%;
+            position: fixed;
+            bottom: 10px;
+            right: 10px;
+            text-indent: -9999px;
+        }
         @media (max-width: 480px) {
             .header { padding: 8px 10px; }
             .header img { height: 30px; }
@@ -144,9 +197,9 @@
 </head>
 <body class="bg-gray-100">
     <div class="header">
-        <img src="/static/dhl-logo.png" alt="DHL Logo">
-        <div class="menu" aria-label="Toggle navigation menu">≡</div>
-        <div class="menu-content">
+        <img src="{{ url_for('static', filename='dhl-logo.png') }}" alt="DHL Logo">
+        <div class="menu" aria-label="Toggle navigation menu" aria-expanded="false" aria-controls="menu-content">≡</div>
+        <div id="menu-content" class="menu-content hidden">
             <a href="{{ url_for('index') }}">Home</a>
             <a href="#">Contact</a>
             <a href="#">Help</a>
@@ -163,8 +216,8 @@
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div id="shipment-details">
                     <p><span class="font-medium">Status:</span> <span id="status">{{ shipment.status }}</span></p>
-                    <p><span class="font-medium">Origin:</span> {{ shipment.origin_address or (shipment.origin_lat ~ ', ' ~ shipment.origin_lng) }}</p>
-                    <p><span class="font-medium">Destination:</span> {{ shipment.dest_address or (shipment.dest_lat ~ ', ' ~ shipment.dest_lng) }}</p>
+                    <p><span class="font-medium">Origin:</span> {{ shipment.origin.address or (shipment.origin.lat ~ ', ' ~ shipment.origin.lng) }}</p>
+                    <p><span class="font-medium">Destination:</span> {{ shipment.destination.address or (shipment.destination.lat ~ ', ' ~ shipment.destination.lng) }}</p>
                     <p><span class="font-medium">Distance:</span> {{ shipment.distance_km | round(2) }} km</p>
                     <p><span class="font-medium">ETA:</span> <span data-eta><script>document.write(formatTimestamp('{{ shipment.eta.isoformat() + 'Z' if shipment.eta else '' }}'))</script></span></p>
                     <p><span class="font-medium">Created:</span> <script>document.write(formatTimestamp('{{ shipment.created_at.isoformat() + 'Z' }}'))</script></p>
@@ -174,11 +227,11 @@
                     <form id="subscribeForm" onsubmit="handleSubscribe(event)">
                         <div class="mb-4">
                             <label for="email" class="block text-gray-700">Email</label>
-                            <input type="email" id="email" name="email" class="w-full p-2 border rounded focus:outline-none focus:ring-2 focus:ring-red-600" placeholder="Enter your email" aria-describedby="email-help">
+                            <input type="email" id="email" name="email" class="w-full p-2 border rounded focus:outline-none focus:ring-2 focus:ring-red-600" placeholder="Enter your email" aria-describedby="email-help" required>
                             <small id="email-help" class="text-gray-600">Enter your email to receive updates.</small>
                         </div>
                         <button type="submit">Subscribe <span class="spinner"></span></button>
-                        <div id="subscribe-result" class="tracking-result mt-4 p-2 bg-gray-200 rounded text-sm hidden"></div>
+                        <div id="subscribe-result" class="form-result mt-4 p-2 bg-gray-200 rounded text-sm hidden" role="alert"></div>
                     </form>
                 </div>
             </div>
@@ -355,6 +408,7 @@
                 result.textContent = response.ok ? 'Subscribed successfully! You will receive updates.' : data.error || 'Subscription failed.';
                 result.classList.remove('hidden');
             } catch (error) {
+                console.error('Subscription error:', error);
                 result.classList.remove('success', 'error');
                 result.classList.add('error');
                 result.textContent = 'Error subscribing to updates.';
@@ -370,7 +424,7 @@
         let map;
         {% if shipment %}
         try {
-            map = L.map('map').setView([{{ shipment.origin_lat }}, {{ shipment.origin_lng }}], 10);
+            map = L.map('map').setView([{{ shipment.origin.lat }}, {{ shipment.origin.lng }}], 10);
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
                 attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors',
                 maxZoom: 19
@@ -378,32 +432,38 @@
 
             // Custom marker icons
             const originIcon = L.icon({
-                iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-green.png',
+                iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-green.png',
+                shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
                 iconSize: [25, 41],
                 iconAnchor: [12, 41],
-                popupAnchor: [1, -34]
+                popupAnchor: [1, -34],
+                shadowSize: [41, 41]
             });
             const destIcon = L.icon({
-                iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png',
+                iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
+                shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
                 iconSize: [25, 41],
                 iconAnchor: [12, 41],
-                popupAnchor: [1, -34]
+                popupAnchor: [1, -34],
+                shadowSize: [41, 41]
             });
             const checkpointIcon = L.icon({
-                iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-blue.png',
+                iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-blue.png',
+                shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
                 iconSize: [25, 41],
                 iconAnchor: [12, 41],
-                popupAnchor: [1, -34]
+                popupAnchor: [1, -34],
+                shadowSize: [41, 41]
             });
 
             // Initial markers and polyline
-            const originMarker = L.marker([{{ shipment.origin_lat }}, {{ shipment.origin_lng }}], { icon: originIcon })
+            const originMarker = L.marker([{{ shipment.origin.lat }}, {{ shipment.origin.lng }}], { icon: originIcon })
                 .addTo(map)
-                .bindPopup('<b>Origin</b><br>{{ shipment.origin_address or (shipment.origin_lat ~ ", " ~ shipment.origin_lng) }}')
+                .bindPopup('<b>Origin</b><br>{{ shipment.origin.address or (shipment.origin.lat ~ ", " ~ shipment.origin.lng) }}')
                 .openPopup();
-            const destMarker = L.marker([{{ shipment.dest_lat }}, {{ shipment.dest_lng }}], { icon: destIcon })
+            const destMarker = L.marker([{{ shipment.destination.lat }}, {{ shipment.destination.lng }}], { icon: destIcon })
                 .addTo(map)
-                .bindPopup('<b>Destination</b><br>{{ shipment.dest_address or (shipment.dest_lat ~ ", " ~ shipment.dest_lng) }}');
+                .bindPopup('<b>Destination</b><br>{{ shipment.destination.address or (shipment.destination.lat ~ ", " ~ shipment.destination.lng) }}');
 
             const checkpoints = [
                 {% for checkpoint in checkpoints %}
@@ -420,7 +480,7 @@
                 {% endfor %}
             ];
 
-            const routeCoords = [[{{ shipment.origin_lat }}, {{ shipment.origin_lng }}]];
+            const routeCoords = [[{{ shipment.origin.lat }}, {{ shipment.origin.lng }}]];
             checkpoints.forEach((cp, index) => {
                 routeCoords.push([cp.lat, cp.lng]);
                 let popupContent = `<b>Checkpoint ${index + 1}: ${cp.label}</b><br>` +
@@ -435,15 +495,15 @@
                 }
                 L.marker([cp.lat, cp.lng], { icon: checkpointIcon }).addTo(map).bindPopup(popupContent);
             });
-            routeCoords.push([{{ shipment.dest_lat }}, {{ shipment.dest_lng }}]);
+            routeCoords.push([{{ shipment.destination.lat }}, {{ shipment.destination.lng }}]);
 
             L.polyline(routeCoords, { color: 'blue', weight: 4 })
                 .addTo(map)
                 .bindPopup(`Distance: {{ shipment.distance_km | round(2) }} km<br>ETA: ${formatTimestamp('{{ shipment.eta.isoformat() + 'Z' if shipment.eta else '' }}')}`);
 
             const bounds = [
-                [{{ shipment.origin_lat }}, {{ shipment.origin_lng }}],
-                [{{ shipment.dest_lat }}, {{ shipment.dest_lng }}],
+                [{{ shipment.origin.lat }}, {{ shipment.origin.lng }}],
+                [{{ shipment.destination.lat }}, {{ shipment.destination.lng }}],
                 ...checkpoints.map(cp => [cp.lat, cp.lng])
             ];
             map.fitBounds(bounds, { padding: [50, 50], maxZoom: 15 });
@@ -478,14 +538,14 @@
                 const checkpointList = document.getElementById('checkpoint-list');
                 checkpointList.innerHTML = '';
                 if (data.checkpoints && data.checkpoints.length > 0) {
-                    data.checkpoints.forEach((cp) => {
+                    data.checkpoints.forEach((cp, index) => {
                         const li = document.createElement('li');
                         li.className = 'border-b py-2';
                         let popupContent = `<p><span class="font-medium">Position:</span> ${cp.position}</p>` +
                                           `<p><span class="font-medium">Label:</span> ${cp.label}</p>` +
                                           `<p><span class="font-medium">Location:</span> (${cp.lat.toFixed(4)}, ${cp.lng.toFixed(4)})</p>` +
                                           `<p><span class="font-medium">Note:</span> ${cp.note || 'None'}</p>` +
-                                          `<p><span class="font-medium">Status:</span> ${cp.status || 'None'}</p>`;
+                                          `<p><span class="font-medium">Status:</span> ${cp.status or 'None'}</p>`;
                         if (cp.proof_photo && cp.proof_photo.startsWith('http')) {
                             popupContent += `<p><span class="font-medium">Proof Photo:</span> <a href="${cp.proof_photo}" class="text-blue-600 hover:underline" target="_blank" rel="noopener">View</a></p>`;
                         } else if (cp.proof_photo) {
@@ -524,7 +584,7 @@
                         .bindPopup(`<b>Origin</b><br>${data.origin.address || `(${data.origin.lat}, ${data.origin.lng})`}`);
                     const destMarker = L.marker([data.destination.lat, data.destination.lng], { icon: destIcon })
                         .addTo(map)
-                        .bindPopup(`<b>Destination</b><br>${data.destination.address || `(${data.destination.lat}, ${data.destination.lng})`}`);
+                        .bindPopup(`<b>Destination</b><br>${data.destination.address || `(${data.destination.lat, data.destination.lng})`}`);
                     const routeCoords = [[data.origin.lat, data.origin.lng]];
                     data.checkpoints.forEach((cp, index) => {
                         routeCoords.push([cp.lat, cp.lng]);
