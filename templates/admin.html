@@ -5,29 +5,174 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Admin Dashboard</title>
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            line-height: 1.6;
+            background-color: #f5f5f5;
+        }
+        .header {
+            background: linear-gradient(to right, #ffcc00, #fff);
+            padding: 10px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+        }
+        .header img {
+            height: 40px;
+            max-width: 100%;
+        }
+        .header .menu {
+            font-size: 24px;
+            cursor: pointer;
+            padding: 10px;
+        }
+        .menu-content {
+            display: none;
+            position: absolute;
+            right: 10px;
+            top: 60px;
+            background: #fff;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            padding: 10px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            min-width: 150px;
+            z-index: 1000;
+        }
+        .menu-content a {
+            display: block;
+            padding: 8px 12px;
+            color: #d32f2f;
+            text-decoration: none;
+            font-size: 16px;
+        }
+        .menu-content a:hover {
+            background-color: #f5f5f5;
+        }
+        .form-box button {
+            background-color: #d32f2f;
+            color: white;
+            padding: 12px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            width: 100%;
+            box-sizing: border-box;
+            font-size: 16px;
+            transition: background-color 0.3s ease;
+            position: relative;
+        }
+        .form-box button:hover {
+            background-color: #b71c1c;
+        }
+        .form-box button:disabled {
+            background-color: #e57373;
+            cursor: not-allowed;
+        }
+        .spinner {
+            display: none;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #d32f2f;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+        }
+        @keyframes spin {
+            0% { transform: translate(-50%, -50%) rotate(0deg); }
+            100% { transform: translate(-50%, -50%) rotate(360deg); }
+        }
+        .form-result {
+            margin-top: 1rem;
+            padding: 0.5rem;
+            border-radius: 5px;
+            font-size: 0.875rem;
+            display: none;
+        }
+        .form-result.success {
+            background: #d4edda;
+            color: #155724;
+        }
+        .form-result.error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        @media (max-width: 480px) {
+            .header { padding: 8px 10px; }
+            .header img { height: 30px; }
+            .menu { font-size: 20px; padding: 8px; }
+            .menu-content { top: 50px; right: 5px; min-width: 120px; }
+            .menu-content a { font-size: 14px; padding: 6px 10px; }
+            .form-box input, .form-box select, .form-box textarea, .form-box button { font-size: 14px; padding: 8px; }
+            .spinner { width: 16px; height: 16px; border-width: 2px; border-top-width: 2px; }
+        }
+        @media (min-width: 481px) and (max-width: 768px) {
+            .header { padding: 10px 15px; }
+            .header img { height: 35px; }
+            .menu-content { top: 55px; right: 10px; }
+            .form-box input, .form-box select, .form-box textarea, .form-box button { font-size: 15px; }
+            .spinner { width: 18px; height: 18px; }
+        }
+        .menu, .form-box button {
+            -webkit-tap-highlight-color: transparent;
+        }
+    </style>
 </head>
-<body class="bg-gray-100 font-sans">
-    <div class="max-w-4xl mx-auto p-6">
-        <h1 class="text-3xl font-bold mb-6">Admin Dashboard</h1>
+<body class="bg-gray-100">
+    <div class="header">
+        <img src="/static/dhl-logo.png" alt="DHL Logo">
+        <div class="menu" aria-label="Toggle navigation menu">≡</div>
+        <div class="menu-content">
+            <a href="{{ url_for('index') }}">Home</a>
+            <a href="#">Contact</a>
+            <a href="#">Help</a>
+            {% if session.authenticated %}
+                <a href="{{ url_for('logout') }}">Logout</a>
+            {% else %}
+                <a href="{{ url_for('login') }}">Login</a>
+            {% endif %}
+        </div>
+    </div>
 
+    <div class="max-w-4xl mx-auto p-6">
+        <h1 class="text-3xl font-bold mb-6 text-red-600">Admin Dashboard</h1>
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="form-result {{ category }}" style="display: block;">
+                        {{ message }}
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
         {% if error %}
-            <div class="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 mb-6" role="alert">
-                <p>{{ error }}</p>
+            <div class="form-result error" style="display: block;">
+                {{ error }}
             </div>
         {% endif %}
 
         <!-- Shipment Creation Form -->
-        <div class="bg-white shadow-md rounded-lg p-6 mb-6">
+        <div class="bg-white shadow-md rounded-lg p-6 mb-6 form-box">
             <h2 class="text-2xl font-semibold mb-4">Create Shipment</h2>
-            <form method="POST" action="{{ url_for('admin') }}">
+            <form id="shipmentForm" onsubmit="handleShipmentSubmit(event)">
                 <input type="hidden" name="form_type" value="shipment">
                 <div class="mb-4">
                     <label class="block text-gray-700">Tracking Number</label>
-                    <input type="text" name="tracking" class="w-full p-2 border rounded" required maxlength="50">
+                    <input type="text" name="tracking" class="w-full p-2 border rounded" required maxlength="50" pattern="\d{10,12}" title="Enter a 10-12 digit tracking number">
                 </div>
                 <div class="mb-4">
                     <label class="block text-gray-700">Title</label>
-                    <input type="text" name="title" class="w-full p-2 border rounded" value="Consignment" maxlength="100">
+                    <input type="text" name="title" class="w-full p-2 border rounded" value="Consignment" maxlength="100" required>
                 </div>
                 <div class="mb-4">
                     <label class="block text-gray-700">Origin (address or lat,lng)</label>
@@ -46,18 +191,19 @@
                         <option value="Delivered">Delivered</option>
                     </select>
                 </div>
-                <button type="submit" class="bg-blue-600 text-white py-2 px-4 rounded hover:bg-blue-700">Create Shipment</button>
+                <button type="submit">Create Shipment <span class="spinner"></span></button>
+                <div id="shipment-result" class="form-result"></div>
             </form>
         </div>
 
         <!-- Checkpoint Creation Form -->
-        <div class="bg-white shadow-md rounded-lg p-6 mb-6">
+        <div class="bg-white shadow-md rounded-lg p-6 mb-6 form-box">
             <h2 class="text-2xl font-semibold mb-4">Add Checkpoint</h2>
-            <form method="POST" action="{{ url_for('admin') }}">
+            <form id="checkpointForm" onsubmit="handleCheckpointSubmit(event)">
                 <input type="hidden" name="form_type" value="checkpoint">
                 <div class="mb-4">
                     <label class="block text-gray-700">Tracking Number</label>
-                    <input type="text" name="tracking" class="w-full p-2 border rounded" required maxlength="50">
+                    <input type="text" name="tracking" class="w-full p-2 border rounded" required maxlength="50" pattern="\d{10,12}" title="Enter a 10-12 digit tracking number">
                 </div>
                 <div class="mb-4">
                     <label class="block text-gray-700">Location (address or lat,lng)</label>
@@ -83,20 +229,21 @@
                 </div>
                 <div class="mb-4">
                     <label class="block text-gray-700">Proof Photo URL</label>
-                    <input type="text" name="proof_photo" class="w-full p-2 border rounded" maxlength="500">
+                    <input type="text" name="proof_photo" class="w-full p-2 border rounded" maxlength="500" pattern="https?://.*" title="Enter a valid URL starting with http:// or https://">
                 </div>
-                <button type="submit" class="bg-blue-600 text-white py-2 px-4 rounded hover:bg-blue-700">Add Checkpoint</button>
+                <button type="submit">Add Checkpoint <span class="spinner"></span></button>
+                <div id="checkpoint-result" class="form-result"></div>
             </form>
         </div>
 
         <!-- Simulation Form -->
-        <div class="bg-white shadow-md rounded-lg p-6 mb-6">
+        <div class="bg-white shadow-md rounded-lg p-6 mb-6 form-box">
             <h2 class="text-2xl font-semibold mb-4">Start Simulation</h2>
-            <form method="POST" action="{{ url_for('admin') }}">
+            <form id="simulationForm" onsubmit="handleSimulationSubmit(event)">
                 <input type="hidden" name="form_type" value="simulation">
                 <div class="mb-4">
                     <label class="block text-gray-700">Tracking Number</label>
-                    <input type="text" name="tracking" class="w-full p-2 border rounded" required maxlength="50">
+                    <input type="text" name="tracking" class="w-full p-2 border rounded" required maxlength="50" pattern="\d{10,12}" title="Enter a 10-12 digit tracking number">
                 </div>
                 <div class="mb-4">
                     <label class="block text-gray-700">Number of Checkpoints (2-10)</label>
@@ -106,41 +253,40 @@
                     <label class="block text-gray-700">Step Hours (1-24)</label>
                     <input type="number" name="step_hours" class="w-full p-2 border rounded" required min="1" max="24">
                 </div>
-                <button type="submit" class="bg-blue-600 text-white py-2 px-4 rounded hover:bg-blue-700">Start Simulation</button>
+                <button type="submit">Start Simulation <span class="spinner"></span></button>
+                <div id="simulation-result" class="form-result"></div>
             </form>
         </div>
 
         <!-- Subscribe Form -->
-        <div class="bg-white shadow-md rounded-lg p-6 mb-6">
+        <div class="bg-white shadow-md rounded-lg p-6 mb-6 form-box">
             <h2 class="text-2xl font-semibold mb-4">Subscribe to Shipment Updates</h2>
-            <form method="POST" action="{{ url_for('admin') }}">
+            <form id="subscribeForm" onsubmit="handleSubscribeSubmit(event)">
                 <input type="hidden" name="form_type" value="subscribe">
                 <div class="mb-4">
                     <label class="block text-gray-700">Tracking Number</label>
-                    <input type="text" name="tracking" class="w-full p-2 border rounded" required maxlength="50">
+                    <input type="text" name="tracking" class="w-full p-2 border rounded" required maxlength="50" pattern="\d{10,12}" title="Enter a 10-12 digit tracking number">
                 </div>
                 <div class="mb-4">
                     <label class="block text-gray-700">Email</label>
-                    <input type="email" name="email" class="w-full p-2 border rounded" maxlength="120">
+                    <input type="email" name="email" class="w-full p-2 border rounded" required maxlength="120">
                 </div>
-                <div class="mb-4">
-                    <label class="block text-gray-700">Phone</label>
-                    <input type="text" name="phone" class="w-full p-2 border rounded" maxlength="20">
-                </div>
-                <button type="submit" class="bg-blue-600 text-white py-2 px-4 rounded hover:bg-blue-700">Subscribe</button>
+                <button type="submit">Subscribe <span class="spinner"></span></button>
+                <div id="subscribe-result" class="form-result"></div>
             </form>
         </div>
 
         <!-- Track Multiple Shipments Form -->
-        <div class="bg-white shadow-md rounded-lg p-6 mb-6">
+        <div class="bg-white shadow-md rounded-lg p-6 mb-6 form-box">
             <h2 class="text-2xl font-semibold mb-4">Track Multiple Shipments</h2>
-            <form method="POST" action="{{ url_for('admin') }}">
+            <form id="trackMultipleForm" onsubmit="handleTrackMultipleSubmit(event)">
                 <input type="hidden" name="form_type" value="track_multiple">
                 <div class="mb-4">
                     <label class="block text-gray-700">Tracking Numbers (comma-separated)</label>
                     <input type="text" name="tracking_numbers" class="w-full p-2 border rounded" required>
                 </div>
-                <button type="submit" class="bg-blue-600 text-white py-2 px-4 rounded hover:bg-blue-700">Track Shipments</button>
+                <button type="submit">Track Shipments <span class="spinner"></span></button>
+                <div id="track-multiple-result" class="form-result"></div>
             </form>
         </div>
 
@@ -150,7 +296,7 @@
             {% if shipments %}
                 <ul class="space-y-2">
                     {% for shipment in shipments %}
-                        <li class="border-b py-2">
+                        <li class="border-b py-2 flex justify-between items-center">
                             <a href="{{ url_for('track', tracking=shipment.tracking) }}" class="text-blue-600 hover:underline">
                                 {{ shipment.title }} ({{ shipment.tracking }}): {{ shipment.status }}
                             </a>
@@ -174,18 +320,365 @@
         </div>
     </div>
 
-    <!--Start of Tawk.to Script-->
+    <div class="footer">
+        <div class="footer-content">
+            <div class="footer-section">
+                <h3 class="text-red-600 font-bold">Contact Us</h3>
+                <p>Email: support@dhl.com</p>
+                <p>Phone: +234 700 345 6789</p>
+                <p>Address: 1 DHL Way, Lagos, Nigeria</p>
+            </div>
+            <div class="footer-section">
+                <h3 class="text-red-600 font-bold">Follow Us</h3>
+                <a href="https://x.com/dhl" target="_blank" class="hover:text-red-600">X</a>
+                <a href="https://facebook.com/dhl" target="_blank" class="hover:text-red-600">Facebook</a>
+                <a href="https://instagram.com/dhl" target="_blank" class="hover:text-red-600">Instagram</a>
+            </div>
+            <div class="footer-section">
+                <h3 class="text-red-600 font-bold">Legal</h3>
+                <a href="#" class="hover:text-red-600">Terms & Conditions</a>
+                <a href="#" class="hover:text-red-600">Privacy Policy</a>
+                <a href="#" class="hover:text-red-600">Cookies</a>
+            </div>
+            <div class="footer-section">
+                <h3 class="text-red-600 font-bold">Support</h3>
+                <a href="#" class="hover:text-red-600">Help Center</a>
+                <a href="#" class="hover:text-red-600">FAQs</a>
+                <a href="#" class="hover:text-red-600">Contact</a>
+            </div>
+        </div>
+        <div class="copyright">
+            © 2025 DHL International. All rights reserved.
+        </div>
+        <a href="/login" class="admin-dot" aria-label="Admin Access"></a>
+    </div>
+
     <script type="text/javascript">
-    var Tawk_API=Tawk_API||{}, Tawk_LoadStart=new Date();
-    (function(){
-    var s1=document.createElement("script"),s0=document.getElementsByTagName("script")[0];
-    s1.async=true;
-    s1.src='https://embed.tawk.to/68e86cda366f2e1951fd6e9f/1j75uidt9';
-    s1.charset='UTF-8';
-    s1.setAttribute('crossorigin','*');
-    s0.parentNode.insertBefore(s1,s0);
-    })();
+        var Tawk_API = Tawk_API || {}, Tawk_LoadStart = new Date();
+        (function(){
+            var s1 = document.createElement("script"), s0 = document.getElementsByTagName("script")[0];
+            s1.async = true;
+            s1.src = 'https://embed.tawk.to/68e86cda366f2e1951fd6e9f/1j75uidt9';
+            s1.charset = 'UTF-8';
+            s1.setAttribute('crossorigin', '*');
+            s0.parentNode.insertBefore(s1, s0);
+        })();
     </script>
-    <!--End of Tawk.to Script-->
+
+    <script>
+        document.querySelector('.menu').addEventListener('click', function() {
+            const menuContent = document.querySelector('.menu-content');
+            menuContent.style.display = menuContent.style.display === 'block' ? 'none' : 'block';
+        });
+        document.addEventListener('click', function(event) {
+            const menu = document.querySelector('.menu');
+            const menuContent = document.querySelector('.menu-content');
+            if (!menu.contains(event.target) && !menuContent.contains(event.target)) {
+                menuContent.style.display = 'none';
+            }
+        });
+
+        async function handleShipmentSubmit(e) {
+            e.preventDefault();
+            const form = e.target;
+            const result = document.getElementById('shipment-result');
+            const button = form.querySelector('button');
+            const spinner = form.querySelector('.spinner');
+            const tracking = form.tracking.value.trim();
+            const title = form.title.value.trim();
+            const origin = form.origin.value.trim();
+            const destination = form.destination.value.trim();
+
+            if (!/^\d{10,12}$/.test(tracking)) {
+                result.textContent = 'Please enter a valid 10-12 digit tracking number.';
+                result.classList.remove('success', 'error');
+                result.classList.add('error');
+                result.style.display = 'block';
+                return;
+            }
+            if (!title) {
+                result.textContent = 'Please enter a title.';
+                result.classList.remove('success', 'error');
+                result.classList.add('error');
+                result.style.display = 'block';
+                return;
+            }
+            const coordRegex = /^-?\d+(\.\d+)?,-?\d+(\.\d+)?$/;
+            if (!origin.match(coordRegex) && !origin) {
+                result.textContent = 'Please enter a valid origin (address or lat,lng).';
+                result.classList.remove('success', 'error');
+                result.classList.add('error');
+                result.style.display = 'block';
+                return;
+            }
+            if (!destination.match(coordRegex) && !destination) {
+                result.textContent = 'Please enter a valid destination (address or lat,lng).';
+                result.classList.remove('success', 'error');
+                result.classList.add('error');
+                result.style.display = 'block';
+                return;
+            }
+
+            button.disabled = true;
+            button.textContent = 'Processing...';
+            spinner.style.display = 'inline-block';
+            try {
+                const response = await fetch('{{ url_for("admin") }}', {
+                    method: 'POST',
+                    body: new FormData(form)
+                });
+                const data = await response.json();
+                result.classList.remove('success', 'error');
+                result.classList.add(response.ok ? 'success' : 'error');
+                result.textContent = response.ok ? 'Shipment created successfully!' : data.error || 'Failed to create shipment.';
+                result.style.display = 'block';
+                if (response.ok) {
+                    form.reset();
+                    setTimeout(() => location.reload(), 1000);
+                }
+            } catch (error) {
+                result.textContent = 'Error creating shipment.';
+                result.classList.remove('success', 'error');
+                result.classList.add('error');
+                result.style.display = 'block';
+            } finally {
+                button.disabled = false;
+                button.textContent = 'Create Shipment';
+                spinner.style.display = 'none';
+            }
+        }
+
+        async function handleCheckpointSubmit(e) {
+            e.preventDefault();
+            const form = e.target;
+            const result = document.getElementById('checkpoint-result');
+            const button = form.querySelector('button');
+            const spinner = form.querySelector('.spinner');
+            const tracking = form.tracking.value.trim();
+            const location = form.location.value.trim();
+            const label = form.label.value.trim();
+
+            if (!/^\d{10,12}$/.test(tracking)) {
+                result.textContent = 'Please enter a valid 10-12 digit tracking number.';
+                result.classList.remove('success', 'error');
+                result.classList.add('error');
+                result.style.display = 'block';
+                return;
+            }
+            const coordRegex = /^-?\d+(\.\d+)?,-?\d+(\.\d+)?$/;
+            if (!location.match(coordRegex) && !location) {
+                result.textContent = 'Please enter a valid location (address or lat,lng).';
+                result.classList.remove('success', 'error');
+                result.classList.add('error');
+                result.style.display = 'block';
+                return;
+            }
+            if (!label) {
+                result.textContent = 'Please enter a label.';
+                result.classList.remove('success', 'error');
+                result.classList.add('error');
+                result.style.display = 'block';
+                return;
+            }
+            if (form.proof_photo.value && !form.proof_photo.value.match(/^https?:\/\/.*/)) {
+                result.textContent = 'Please enter a valid URL for the proof photo.';
+                result.classList.remove('success', 'error');
+                result.classList.add('error');
+                result.style.display = 'block';
+                return;
+            }
+
+            button.disabled = true;
+            button.textContent = 'Processing...';
+            spinner.style.display = 'inline-block';
+            try {
+                const response = await fetch('{{ url_for("admin") }}', {
+                    method: 'POST',
+                    body: new FormData(form)
+                });
+                const data = await response.json();
+                result.classList.remove('success', 'error');
+                result.classList.add(response.ok ? 'success' : 'error');
+                result.textContent = response.ok ? 'Checkpoint added successfully!' : data.error || 'Failed to add checkpoint.';
+                result.style.display = 'block';
+                if (response.ok) {
+                    form.reset();
+                    setTimeout(() => location.reload(), 1000);
+                }
+            } catch (error) {
+                result.textContent = 'Error adding checkpoint.';
+                result.classList.remove('success', 'error');
+                result.classList.add('error');
+                result.style.display = 'block';
+            } finally {
+                button.disabled = false;
+                button.textContent = 'Add Checkpoint';
+                spinner.style.display = 'none';
+            }
+        }
+
+        async function handleSimulationSubmit(e) {
+            e.preventDefault();
+            const form = e.target;
+            const result = document.getElementById('simulation-result');
+            const button = form.querySelector('button');
+            const spinner = form.querySelector('.spinner');
+            const tracking = form.tracking.value.trim();
+            const numPoints = form.num_points.value;
+            const stepHours = form.step_hours.value;
+
+            if (!/^\d{10,12}$/.test(tracking)) {
+                result.textContent = 'Please enter a valid 10-12 digit tracking number.';
+                result.classList.remove('success', 'error');
+                result.classList.add('error');
+                result.style.display = 'block';
+                return;
+            }
+            if (numPoints < 2 || numPoints > 10) {
+                result.textContent = 'Number of checkpoints must be between 2 and 10.';
+                result.classList.remove('success', 'error');
+                result.classList.add('error');
+                result.style.display = 'block';
+                return;
+            }
+            if (stepHours < 1 || stepHours > 24) {
+                result.textContent = 'Step hours must be between 1 and 24.';
+                result.classList.remove('success', 'error');
+                result.classList.add('error');
+                result.style.display = 'block';
+                return;
+            }
+
+            button.disabled = true;
+            button.textContent = 'Processing...';
+            spinner.style.display = 'inline-block';
+            try {
+                const response = await fetch('{{ url_for("admin") }}', {
+                    method: 'POST',
+                    body: new FormData(form)
+                });
+                const data = await response.json();
+                result.classList.remove('success', 'error');
+                result.classList.add(response.ok ? 'success' : 'error');
+                result.textContent = response.ok ? 'Simulation started successfully!' : data.error || 'Failed to start simulation.';
+                result.style.display = 'block';
+                if (response.ok) {
+                    form.reset();
+                    setTimeout(() => location.reload(), 1000);
+                }
+            } catch (error) {
+                result.textContent = 'Error starting simulation.';
+                result.classList.remove('success', 'error');
+                result.classList.add('error');
+                result.style.display = 'block';
+            } finally {
+                button.disabled = false;
+                button.textContent = 'Start Simulation';
+                spinner.style.display = 'none';
+            }
+        }
+
+        async function handleSubscribeSubmit(e) {
+            e.preventDefault();
+            const form = e.target;
+            const result = document.getElementById('subscribe-result');
+            const button = form.querySelector('button');
+            const spinner = form.querySelector('.spinner');
+            const tracking = form.tracking.value.trim();
+            const email = form.email.value.trim();
+
+            if (!/^\d{10,12}$/.test(tracking)) {
+                result.textContent = 'Please enter a valid 10-12 digit tracking number.';
+                result.classList.remove('success', 'error');
+                result.classList.add('error');
+                result.style.display = 'block';
+                return;
+            }
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            if (!email) {
+                result.textContent = 'Please enter an email address.';
+                result.classList.remove('success', 'error');
+                result.classList.add('error');
+                result.style.display = 'block';
+                return;
+            }
+            if (!emailRegex.test(email)) {
+                result.textContent = 'Please enter a valid email address.';
+                result.classList.remove('success', 'error');
+                result.classList.add('error');
+                result.style.display = 'block';
+                return;
+            }
+
+            button.disabled = true;
+            button.textContent = 'Processing...';
+            spinner.style.display = 'inline-block';
+            try {
+                const response = await fetch(`/shipments/${tracking}/subscribe`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email })
+                });
+                const data = await response.json();
+                result.classList.remove('success', 'error');
+                result.classList.add(response.ok ? 'success' : 'error');
+                result.textContent = response.ok ? 'Subscribed successfully!' : data.error || 'Failed to subscribe.';
+                result.style.display = 'block';
+                if (response.ok) form.reset();
+            } catch (error) {
+                result.textContent = 'Error subscribing to updates.';
+                result.classList.remove('success', 'error');
+                result.classList.add('error');
+                result.style.display = 'block';
+            } finally {
+                button.disabled = false;
+                button.textContent = 'Subscribe';
+                spinner.style.display = 'none';
+            }
+        }
+
+        async function handleTrackMultipleSubmit(e) {
+            e.preventDefault();
+            const form = e.target;
+            const result = document.getElementById('track-multiple-result');
+            const button = form.querySelector('button');
+            const spinner = form.querySelector('.spinner');
+            const trackingNumbers = form.tracking_numbers.value.trim();
+
+            const trackingArray = trackingNumbers.split(',').map(t => t.trim());
+            if (trackingArray.some(t => !/^\d{10,12}$/.test(t))) {
+                result.textContent = 'All tracking numbers must be 10-12 digits.';
+                result.classList.remove('success', 'error');
+                result.classList.add('error');
+                result.style.display = 'block';
+                return;
+            }
+
+            button.disabled = true;
+            button.textContent = 'Processing...';
+            spinner.style.display = 'inline-block';
+            try {
+                const response = await fetch('{{ url_for("admin") }}', {
+                    method: 'POST',
+                    body: new FormData(form)
+                });
+                const data = await response.json();
+                result.classList.remove('success', 'error');
+                result.classList.add(response.ok ? 'success' : 'error');
+                result.textContent = response.ok ? 'Tracking request submitted successfully!' : data.error || 'Failed to track shipments.';
+                result.style.display = 'block';
+                if (response.ok) form.reset();
+            } catch (error) {
+                result.textContent = 'Error tracking shipments.';
+                result.classList.remove('success', 'error');
+                result.classList.add('error');
+                result.style.display = 'block';
+            } finally {
+                button.disabled = false;
+                button.textContent = 'Track Shipments';
+                spinner.style.display = 'none';
+            }
+        }
+    </script>
 </body>
 </html>
